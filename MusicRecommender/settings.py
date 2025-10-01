@@ -147,6 +147,16 @@ REST_FRAMEWORK = {
     ),
 }
 
+REST_AUTH = {
+    "USE_JWT": True,
+    "JWT_AUTH_HTTPONLY": False,
+    "JWT_AUTH_COOKIE": "Main-auth",
+    "JWT_AUTH_REFRESH_COOKIE": "Main-refresh-token",
+    #"LOGIN_SERIALIZER": "users.serializers.CustomLoginSerializer",
+    "REGISTER_SERIALIZER": "users.serializers.CustomRegisterSerializer",
+}
+
+
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME":timedelta(minutes=5),
     "REFRESH_TOKEN_LIFETIME":timedelta(days=1),
