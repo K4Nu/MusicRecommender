@@ -152,7 +152,7 @@ REST_AUTH = {
     "JWT_AUTH_HTTPONLY": False,
     "JWT_AUTH_COOKIE": "Main-auth",
     "JWT_AUTH_REFRESH_COOKIE": "Main-refresh-token",
-    #"LOGIN_SERIALIZER": "users.serializers.CustomLoginSerializer",
+    "LOGIN_SERIALIZER": "users.serializers.CustomLoginSerializer",
     "REGISTER_SERIALIZER": "users.serializers.CustomRegisterSerializer",
 }
 
@@ -187,3 +187,4 @@ ACCOUNT_USER_MODEL_USERNAME_FIELD = None
 ACCOUNT_EMAIL_REQUIRED = True
 ACCOUNT_USERNAME_REQUIRED = False
 ACCOUNT_AUTHENTICATION_METHOD = 'email'
+ACCOUNT_CONFIRM_EMAIL_ON_GET = True
