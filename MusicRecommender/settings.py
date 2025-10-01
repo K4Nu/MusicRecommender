@@ -44,6 +44,8 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'users',
     'corsheaders',
+    'drf_spectacular',
+    'drf_spectacular_sidecar',
     'rest_framework',
     'rest_framework.authtoken',
     'dj_rest_auth',
@@ -145,13 +147,28 @@ REST_FRAMEWORK = {
         "dj_rest_auth.jwt_auth.JWTCookieAuthentication",  # JWT w cookie
         # alternatywnie nagłówek: "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Music Recommender',
+    'DESCRIPTION': 'Lorem ipsum',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'SWAGGER_UI_DIST': 'SIDECAR',
+    'SWAGGER_UI_FAVICON_HREF': 'SIDECAR',
+    'REDOC_DIST': 'SIDECAR',
+}
+
+CSRF_TRUSTED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
+CORS_ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
+CORS_ALLOW_CREDENTIALS = True
 
 REST_AUTH = {
     "USE_JWT": True,
     "JWT_AUTH_HTTPONLY": False,
-    "JWT_AUTH_COOKIE": "Main-auth",
-    "JWT_AUTH_REFRESH_COOKIE": "Main-refresh-token",
+    "JWT_AUTH_COOKIE": "auth",
+    "JWT_AUTH_REFRESH_COOKIE": "refresh",
     "LOGIN_SERIALIZER": "users.serializers.CustomLoginSerializer",
     "REGISTER_SERIALIZER": "users.serializers.CustomRegisterSerializer",
 }
@@ -184,7 +201,7 @@ STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 ACCOUNT_USER_MODEL_USERNAME_FIELD = None
-ACCOUNT_EMAIL_REQUIRED = True
-ACCOUNT_USERNAME_REQUIRED = False
-ACCOUNT_AUTHENTICATION_METHOD = 'email'
+ACCOUNT_LOGIN_METHODS = {"email"}  # email-only login
+ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']  # note the * on email
+ACCOUNT_EMAIL_VERIFICATION = "mandatory"
 ACCOUNT_CONFIRM_EMAIL_ON_GET = True
