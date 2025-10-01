@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'users',
     'corsheaders',
     'rest_framework',
     'rest_framework.authtoken',
@@ -161,7 +162,7 @@ CSRF_COOKIE_SECURE = True
 SESSION_COOKIE_SECURE = True
 
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-
+AUTH_USER_MODEL='users.User'
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
