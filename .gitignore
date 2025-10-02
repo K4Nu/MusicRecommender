@@ -6,3 +6,5 @@ db.sqlite3
 staticfiles/
 media/
 .idea
+htmlcov
+.coverage
