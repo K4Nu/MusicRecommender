@@ -72,3 +72,12 @@ class Genre(models.Model):
     def __str__(self):
         return self.name
 
+class Artist(models.Model):
+    spotify_id = models.CharField(max_length=255, unique=True)
+    name=models.CharField(max_length=255)
+    genres=models.ManyToManyField(Genre, related_name='artists')
+    popularity=models.IntegerField(null=True)
+    image_url=models.URLField(null=True,blank=True)
+
+    def __str__(self):
+        return self.name
