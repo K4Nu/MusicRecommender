@@ -120,3 +120,11 @@ class UserTopItem(models.Model):
 
     ordering =[ "rank"]
     unique_together = ["user","item_type","time_range","rank"]
+
+class ListeningHistory(models.Model):
+    user=models.ForeignKey(User, on_delete=models.CASCADE, related_name='listening_history')
+    track=models.ForeignKey(Track, on_delete=models.CASCADE)
+    played_at=models.DateTimeField()
+
+    class Meta:
+        ordering = ['-played_at']
