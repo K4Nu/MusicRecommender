@@ -5,7 +5,7 @@ from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions, status
-
+from .tasks import fetch_spotify_initial_data
 from users.models import SpotifyAccount
 
 
@@ -32,7 +32,7 @@ class SpotifyConnect(APIView):
         auth = (os.environ.get('SPOTIFY_CLIENT_ID'), os.environ.get('SPOTIFY_CLIENT_SECRET'))
 
         try:
-            token_response = requests.post(token_url, data=token_data, auth=auth)  # ← dodany auth=auth
+            token_response = requests.post(token_url, data=token_data, auth=auth)
             token_response.raise_for_status()
             token_json = token_response.json()
 
@@ -52,8 +52,7 @@ class SpotifyConnect(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        expires_at = timezone.now() + timedelta(seconds=expires_in)  # ← poprawione
-
+        expires_at = timezone.now() + timedelta(seconds=expires_in)
         profile_url = "https://api.spotify.com/v1/me"
         headers = {"Authorization": f"Bearer {access_token}"}
 
@@ -76,15 +75,17 @@ class SpotifyConnect(APIView):
             )
 
         spotify_account, created = SpotifyAccount.objects.update_or_create(
-            # ← użyj update_or_create zamiast get_or_create
             user=request.user,
             defaults={
                 "spotify_id": spotify_id,
                 "access_token": access_token,
                 "refresh_token": refresh_token,
-                "expires_at": expires_at,  # ← poprawione z expires_in na expires_at
+                "expires_at": expires_at,
             }
         )
+
+        if created:
+            fetch_spotify_initial_data.delay(request.user.id)
 
         return Response(
             {
