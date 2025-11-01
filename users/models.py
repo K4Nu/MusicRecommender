@@ -95,3 +95,28 @@ class Track(models.Model):
 
     def __str__(self):
         return self.name
+
+class UserTopItem(models.Model):
+    TIME_RANGE_CHOICES = [
+        ('short_term', 'Last 4 weeks'),
+        ('medium_term', 'Last 6 months'),
+        ('long_term', 'All time'),
+    ]
+
+    ITEM_TYPE_CHOICES = [
+        ('artist', 'Artist'),
+        ('track', 'Track'),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='top_items')
+    item_type = models.CharField(max_length=255, choices=ITEM_TYPE_CHOICES)
+    time_range = models.CharField(max_length=20, choices=TIME_RANGE_CHOICES)
+
+    artist = models.ForeignKey(Artist, on_delete=models.CASCADE)
+    track = models.ForeignKey(Track, on_delete=models.CASCADE)
+
+    rank = models.IntegerField()
+    fetched_at=models.DateTimeField(auto_now_add=True)
+
+    ordering =[ "rank"]
+    unique_together = ["user","item_type","time_range","rank"]
