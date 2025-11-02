@@ -12,7 +12,7 @@ load_dotenv()
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-change-me")
 DEBUG = os.getenv("DEBUG", "True") == "True"
 ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
-
+INTERNAL_IPS = ["127.0.0.1", "localhost"]
 # ---------------------- CORS / CSRF ----------------------
 # Frontend: 127.0.0.1:5173 – keep host consistent
 CORS_ALLOWED_ORIGINS = ["http://127.0.0.1:5173"]
@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     "allauth.socialaccount",
     "allauth.socialaccount.providers.spotify",
     "djoser",
+    "debug_toolbar",
 
     # Local apps
     'users',
@@ -57,6 +58,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "debug_toolbar.middleware.DebugToolbarMiddleware",
 ]
 
 ROOT_URLCONF = 'Recommender.urls'
