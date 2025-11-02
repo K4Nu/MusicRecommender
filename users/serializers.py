@@ -24,3 +24,13 @@ class CustomRegisterSerializer(UserCreateSerializer):
         user.set_password(password)
         user.save()
         return user
+
+class UserTopTrackSerializer(serializers.Serializer):
+    rank=serializers.IntegerField()
+    name=serializers.CharField(source="track.name")
+    artists=serializers.SerializerMethodField()
+    image_url=serializers.URLField("track.image_url", allow_null=True)
+    spotify_id=serializers.CharField(source="track.spotify_id")
+
+    def get_artists(self, obj):
+        return [a.name for a in obj.track.artists.all()]
