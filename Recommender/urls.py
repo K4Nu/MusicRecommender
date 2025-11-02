@@ -16,11 +16,12 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from users.views import SpotifyConnect
+from users.views import SpotifyConnect,UserTopTracks
 urlpatterns = [
     path('admin/', admin.site.urls),
     path("auth/spotify/connect/",SpotifyConnect.as_view()),
     path("auth/", include("djoser.urls")),
     path("auth/", include("djoser.urls.jwt")),
     path("auth/social/", include("allauth.socialaccount.urls")),
+    path("user/top_track/", UserTopTracks.as_view()),
 ]
