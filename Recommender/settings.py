@@ -49,16 +49,17 @@ INSTALLED_APPS = [
 SITE_ID = 1
 
 MIDDLEWARE = [
-    "corsheaders.middleware.CorsMiddleware",  # must be before CommonMiddleware
     "django.middleware.security.SecurityMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
-    "allauth.account.middleware.AccountMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
-    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "Recommender.middleware.JWTAuthCookieMiddleware",
     "debug_toolbar.middleware.DebugToolbarMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "allauth.account.middleware.AccountMiddleware",
 ]
 
 ROOT_URLCONF = 'Recommender.urls'
