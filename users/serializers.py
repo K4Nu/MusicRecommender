@@ -29,7 +29,7 @@ class UserTopTrackSerializer(serializers.Serializer):
     rank=serializers.IntegerField()
     name=serializers.CharField(source="track.name")
     artists=serializers.SerializerMethodField()
-    image_url=serializers.URLField("track.image_url", allow_null=True)
+    image_url=serializers.URLField(source="track.image_url", allow_null=True)
     spotify_id=serializers.CharField(source="track.spotify_id")
 
     def get_artists(self, obj):

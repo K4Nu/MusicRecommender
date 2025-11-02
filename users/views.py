@@ -2,12 +2,14 @@ import os
 from datetime import timedelta
 import requests
 from django.utils import timezone
+from djoser.serializers import UserSerializer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions, status
 from .tasks import fetch_spotify_initial_data
 from users.models import SpotifyAccount,UserTopItem
-
+from rest_framework import generics
+from .serializers import UserTopTrackSerializer
 
 class SpotifyConnect(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -116,3 +118,12 @@ class UserTopTracks(APIView):
         } for item in top_items]
 
         return Response(data)
+
+class TestView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = UserTopTrackSerializer
+
+    def get_queryset(self):
+        time_range=self.request.query_params.get('time_range', "medium_term")
+        return(UserTopItem.objects.filter(user=self.request.user, item_type='track', time_range=time_range).select_related('track')
+               .prefetch_related("track__artists").order_by('rank'))

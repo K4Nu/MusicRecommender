@@ -34,7 +34,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework_simplejwt",
     "drf_spectacular",
-    # "drf_spectacular_sidecar",  # Uncomment only if you want local Swagger UI assets
+    "drf_spectacular_sidecar",  # Uncomment only if you want local Swagger UI assets
     "allauth",
     "allauth.account",
     "allauth.socialaccount",
