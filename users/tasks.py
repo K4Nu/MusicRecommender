@@ -3,8 +3,9 @@ from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta
 import requests
-from .models import SpotifyAccount
+from .models import UserTopItem, Artist, Track, User,SpotifyAccount
 import json
+
 
 @shared_task
 def fetch_spotify_initial_data(user_id):
@@ -108,12 +109,33 @@ def fetch_top_items(headers, item_type, time_range, user_id):
         response.raise_for_status()
         data = response.json()
 
+
         items = data.get('items', [])
         print(f"Fetched {len(items)} top {item_type} ({time_range}) for user {user_id}")
 
         # TODO: Zapisz do bazy danych
-        # for item in items:
-        #     save_artist_or_track(item, user_id, time_range)
+        user=User.objects.filter(id=user_id)
+        UserTopItem.objects.filter(user=user,
+                                   item_type=item_type[:-1],
+                                   time_range=time_range).delete()
+
+        for rank,item in enumerate(items,start=1):
+            if item_type == 'artists':
+                artist=save_artist(item)
+                UserTopItem.objects.create(user=user,
+                                           item_type="artist",
+                                           time_range=time_range,
+                                           rank=rank,)
+            else:
+                track = save_track(item)
+                UserTopItem.objects.create(
+                    user=user,
+                    item_type='track',
+                    time_range=time_range,
+                    track=track,
+                    rank=rank
+                )
+
 
     except requests.exceptions.RequestException as e:
         print(f"Failed to fetch top {item_type} ({time_range}): {e}")
@@ -194,3 +216,33 @@ def fetch_playlists(headers, user_id):
         print(f"Failed to fetch playlists: {e}")
 
     print(json.dumps(playlists, indent=2))
+
+def save_artist(artist_data):
+
+    artist,created=Artist.objects.update_or_create(
+        spotify_id=artist_data.get('id'),
+        name=artist_data.get('name'),
+        popularity=artist_data.get('popularity'),
+        image_uri=artist_data.get('images')[0].get('uri') if artist_data.get('images') else None,
+    )
+
+    return artist
+
+def save_track(track_data):
+    track,created=Track.objects.update_or_create(
+        spotify_id=track_data.get('id'),
+        defaults={
+            "name":track_data.get('name'),
+            "album_name":track_data.get('album_name'),
+            "duration_ms":track_data.get('duration_ms'),
+            "popularity":track_data.get('popularity'),
+            "preview_url":track_data.get('preview_url'),
+                        'image_url': track_data['album']['images'][0]['url'] if track_data['album'].get('images') else None,
+        }
+    )
+    if created:
+        for artist_data in track_data.get('artists'):
+            artist=save_artist(artist_data)
+            track.artists.add(artist)
+
+        return track
