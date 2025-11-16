@@ -4,6 +4,8 @@ from django.contrib.auth.models import PermissionsMixin
 from django.db import models
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator, MaxValueValidator
+
 
 
 class MyUserManager(BaseUserManager):
@@ -128,3 +130,97 @@ class ListeningHistory(models.Model):
 
     class Meta:
         ordering = ['-played_at']
+
+
+class AudioFeatures(models.Model):
+    track = models.OneToOneField(
+        Track,
+        on_delete=models.CASCADE,
+        related_name='audio_features'
+    )
+
+    # Wartości 0-1
+    danceability = models.FloatField(
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
+    )
+    energy = models.FloatField(
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
+    )
+    valence = models.FloatField(
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
+    )
+    acousticness = models.FloatField(
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
+    )
+    instrumentalness = models.FloatField(
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
+    )
+    speechiness = models.FloatField(
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
+    )
+    liveness = models.FloatField(
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
+    )
+
+    # Loudness w dB (-60 do 0)
+    loudness = models.FloatField(
+        validators=[MinValueValidator(-60.0), MaxValueValidator(0.0)]
+    )
+
+    # Key (0-11, lub -1 = no key detected)
+    key = models.IntegerField(
+        validators=[MinValueValidator(-1), MaxValueValidator(11)]
+    )
+
+    # Mode (0=minor, 1=major)
+    mode = models.IntegerField(
+        validators=[MinValueValidator(0), MaxValueValidator(1)]
+    )
+
+    # Tempo (BPM)
+    tempo = models.FloatField(
+        validators=[MinValueValidator(0.0)]  # Tempo nie może być ujemne
+    )
+
+    # Time signature (3-7)
+    time_signature = models.IntegerField(
+        validators=[MinValueValidator(3), MaxValueValidator(7)]
+    )
+
+    # Duration (opcjonalne - masz już w Track, ale Spotify zwraca też tutaj)
+    duration_ms = models.PositiveIntegerField(null=True, blank=True)
+
+    # Metadata
+    fetched_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"AudioFeatures for {self.track.name}"
+
+    @property
+    def mood_score(self):
+        return (self.valence+self.energy)/2
+
+    @property
+    def danceability_category(self):
+        if self.danceability >=0.8:
+            return "Very Danceable"
+        elif self.danceability >=0.6:
+            return "Danceable"
+        elif self.danceability >=0.4:
+            return "Moderately Danceable"
+        else:
+            return "Not Danceable"
+
+    @property
+    def key_name(self):
+        """Convert key number to note name"""
+        keys = ['C', 'C♯/D♭', 'D', 'D♯/E♭', 'E', 'F',
+                'F♯/G♭', 'G', 'G♯/A♭', 'A', 'A♯/B♭', 'B']
+        return keys[self.key] if 0 <= self.key <= 11 else "Unknown"
+
+    @property
+    def mode_name(self):
+        return "Major" if self.mode == 1 else "Minor"
+
+    class Meta:
+        verbose_name_plural = "Audio Features"
