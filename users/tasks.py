@@ -3,7 +3,7 @@ from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta
 import requests
-from .models import UserTopItem, Artist, Track, User,SpotifyAccount
+from .models import UserTopItem, Artist, Track, User, SpotifyAccount
 import json
 
 
@@ -246,3 +246,30 @@ def save_track(track_data):
             track.artists.add(artist)
 
         return track
+
+@shared_task
+def refresh_spotify_data(time_term):
+    spotify_users=SpotifyAccount.objects.all()
+    for spotify_user in spotify_users:
+        refresh_spotify_user_data.delay(spotify_user.id, time_term)
+
+
+@shared_task
+def refresh_spotify_user_data(spotify_account_id, time_term):
+    try:
+        spotify_account = SpotifyAccount.objects.get(id=spotify_account_id)
+        access_token = get_valid_token(spotify_account)
+
+        if not access_token:
+            print(f"Failed to get token for SpotifyAccount {spotify_account_id}")
+            return
+
+        headers = {"Authorization": f"Bearer {access_token}"}
+        fetch_top_items(headers, "artists", time_term, spotify_account.user.id)
+        fetch_top_items(headers, "tracks", time_term, spotify_account.user.id)
+
+        spotify_account.last_synced_at = timezone.now()
+        spotify_account.save()
+
+    except SpotifyAccount.DoesNotExist:
+        print(f"SpotifyAccount {spotify_account_id} does not exist")

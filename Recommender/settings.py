@@ -41,6 +41,8 @@ INSTALLED_APPS = [
     "allauth.socialaccount.providers.spotify",
     "djoser",
     "debug_toolbar",
+    'django_celery_beat',
+    'django_celery_results',
 
     # Local apps
     'users',
