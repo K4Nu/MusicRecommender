@@ -3,7 +3,7 @@ from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta
 import requests
-from .models import UserTopItem, Artist, Track, User, SpotifyAccount
+from .models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures
 import json
 
 
@@ -273,3 +273,74 @@ def refresh_spotify_user_data(spotify_account_id, time_term):
 
     except SpotifyAccount.DoesNotExist:
         print(f"SpotifyAccount {spotify_account_id} does not exist")
+
+@shared_task
+def fetch_tracks_audio_features():
+    track_ids = Track.objects.filter(audio_features__isnull=True).values_list('spotify_id', flat=True)
+    chunks = [track_ids[i:i+100] for i in range(0,len(track_ids),100)]
+    for chunk in chunks:
+        chunk_audio_features.delay(",".join(chunk))
+
+
+@shared_task
+def chunk_audio_features(data_chunk):
+    url = f"https://api.spotify.com/v1/audio-features?ids={data_chunk}"
+    spotify_user = SpotifyAccount.objects.first()
+
+    if not spotify_user:
+        print("No Spotify account available")
+        return
+
+    access_token = get_valid_token(spotify_user)
+    if not access_token:
+        print("Failed to get token")
+        return
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        print(f"API request failed: {e}")
+        return
+
+    audio_features = data.get('audio_features', [])
+    features_to_create = []
+
+    for feature in audio_features:
+        if not feature:
+            continue
+
+        track_spotify_id = feature.get('id')
+
+        try:
+            track_obj = Track.objects.get(spotify_id=track_spotify_id)
+
+
+            audio_feature = AudioFeatures(
+                track=track_obj,  # ← Obiekt Track, nie string!
+                danceability=feature.get('danceability'),
+                energy=feature.get('energy'),
+                valence=feature.get('valence'),
+                acousticness=feature.get('acousticness'),
+                instrumentalness=feature.get('instrumentalness'),
+                speechiness=feature.get('speechiness'),
+                liveness=feature.get('liveness'),
+                loudness=feature.get('loudness'),
+                key=feature.get('key'),
+                mode=feature.get('mode'),
+                tempo=feature.get('tempo'),
+                time_signature=feature.get('time_signature'),
+                duration_ms=feature.get('duration_ms'),
+            )
+            features_to_create.append(audio_feature)
+
+        except Track.DoesNotExist:
+            print(f"Track {track_spotify_id} not found in DB")
+            continue
+
+    if features_to_create:
+        AudioFeatures.objects.bulk_create(features_to_create, ignore_conflicts=True)
+        print(f"Created {len(features_to_create)} audio features")
