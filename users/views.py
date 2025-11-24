@@ -127,3 +127,66 @@ class TestView(generics.ListAPIView):
         time_range=self.request.query_params.get('time_range', "medium_term")
         return(UserTopItem.objects.filter(user=self.request.user, item_type='track', time_range=time_range).select_related('track')
                .prefetch_related("track__artists").order_by('rank'))
+
+
+class YoutubeConnect(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        code = request.data.get('code')
+        redirect_uri = request.data.get('redirect_uri')
+        codeVerifier = request.data.get("codeVerifier")
+
+        if not code or not redirect_uri:
+            return Response(
+                {"detail": "Missing 'code' or 'redirect_uri'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        print(f'📥 Received params:')
+        print(f'  code: {code[:20]}...')
+        print(f'  redirect_uri: {redirect_uri}')
+        print(f'  codeVerifier: {codeVerifier[:20] if codeVerifier else None}...')
+        print(f'  client_id: {os.environ.get("YOUTUBE_CLIENT_ID")}')
+
+        token_url = "https://oauth2.googleapis.com/token"
+        token_data = {
+            'grant_type': 'authorization_code',
+            'code': code,
+            'redirect_uri': redirect_uri,
+            'client_id': os.environ['YOUTUBE_CLIENT_ID'],
+            "code_verifier": codeVerifier,
+            "client_secret":os.environ['YOUTUBE_CLIENT_SECRET'],
+        }
+
+        try:
+            token_response = requests.post(token_url, data=token_data)  # <- WCIĘCIE!
+
+            print(f"📊 Google response status: {token_response.status_code}")  # <- WCIĘCIE!
+            print(f"📄 Google response body: {token_response.text}")  # <- WCIĘCIE!
+
+            if not token_response.ok:  # <- WCIĘCIE!
+                return Response(
+                    {
+                        "detail": "Failed to exchange code for token",
+                        "status": token_response.status_code,
+                        "google_error": token_response.text
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            token_json = token_response.json()  # <- WCIĘCIE! (i usuń poprzednie wcięcie przed tym)
+
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Request completely failed: {str(e)}")
+            return Response(
+                {"detail": f"Request error: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        print(f"✅ Token received: {token_json}")
+
+        return Response(
+            {"message": "Successfully logged in."},
+            status=status.HTTP_200_OK,
+        )
