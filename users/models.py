@@ -224,3 +224,11 @@ class AudioFeatures(models.Model):
 
     class Meta:
         verbose_name_plural = "Audio Features"
+
+class YoutubeAccount(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    youtube_id = models.CharField(max_length=255, unique=True)
+    access_token = models.CharField(max_length=512)
+    refresh_token = models.CharField(max_length=512)
+    expires_in = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)

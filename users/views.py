@@ -185,7 +185,6 @@ class YoutubeConnect(APIView):
             )
 
         print(f"✅ Token received: {token_json}")
-
         return Response(
             {"message": "Successfully logged in."},
             status=status.HTTP_200_OK,
