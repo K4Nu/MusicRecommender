@@ -6,7 +6,7 @@ from djoser.serializers import UserSerializer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions, status
-from .tasks import fetch_spotify_initial_data
+from .tasks import fetch_spotify_initial_data,youtube_test_fetch
 from users.models import SpotifyAccount,UserTopItem
 from rest_framework import generics
 from .serializers import UserTopTrackSerializer
@@ -160,12 +160,12 @@ class YoutubeConnect(APIView):
         }
 
         try:
-            token_response = requests.post(token_url, data=token_data)  # <- WCIĘCIE!
+            token_response = requests.post(token_url, data=token_data)
 
-            print(f"📊 Google response status: {token_response.status_code}")  # <- WCIĘCIE!
-            print(f"📄 Google response body: {token_response.text}")  # <- WCIĘCIE!
+            print(f"📊 Google response status: {token_response.status_code}")
+            print(f"📄 Google response body: {token_response.text}")
 
-            if not token_response.ok:  # <- WCIĘCIE!
+            if not token_response.ok:
                 return Response(
                     {
                         "detail": "Failed to exchange code for token",
@@ -175,7 +175,7 @@ class YoutubeConnect(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            token_json = token_response.json()  # <- WCIĘCIE! (i usuń poprzednie wcięcie przed tym)
+            token_json = token_response.json()
 
         except requests.exceptions.RequestException as e:
             print(f"❌ Request completely failed: {str(e)}")
@@ -185,6 +185,8 @@ class YoutubeConnect(APIView):
             )
 
         print(f"✅ Token received: {token_json}")
+        #here function from tasks
+        youtube_test_fetch(token_json.get("access_token"))
         return Response(
             {"message": "Successfully logged in."},
             status=status.HTTP_200_OK,
