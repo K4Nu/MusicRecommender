@@ -344,3 +344,34 @@ def chunk_audio_features(data_chunk):
     if features_to_create:
         AudioFeatures.objects.bulk_create(features_to_create, ignore_conflicts=True)
         print(f"Created {len(features_to_create)} audio features")
+
+@shared_task
+def youtube_test_fetch(access_token, page_token=None):
+
+    url='https://www.googleapis.com/youtube/v3/subscriptions'
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {
+        'part': 'snippet',
+        'mine': 'true',
+        "maxResults": 50,
+    }
+
+    if page_token:
+        params['pageToken'] = page_token
+
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        data=response.json()
+    except requests.exceptions.RequestException as e:
+        print(e)
+        return
+
+    items=data.get('items', [])
+    for item in items:
+        #add here function for getting channel and then search for info
+        pass
+
+    next_page_token = data.get('nextPageToken')
+    if next_page_token:
+        youtube_test_fetch.delay(access_token,next_page_token)
