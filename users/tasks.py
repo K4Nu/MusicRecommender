@@ -456,3 +456,22 @@ def get_recent_video_categories(channel_id,access_token):
         for item in data.get("items", [])
         if "snippet" in item
     ]
+
+def get_youtube_channel_id(access_token):
+    """Pobiera channel ID zalogowanego użytkownika"""
+    url = "https://www.googleapis.com/youtube/v3/channels"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {
+        "part": "id,snippet",
+        "mine": "true"
+    }
+
+    response = requests.get(url, headers=headers, params=params)
+    response.raise_for_status()
+    data = response.json()
+
+    items = data.get("items", [])
+    if not items:
+        raise ValueError("No YouTube channel found for this account")
+
+    return items[0]["id"]
