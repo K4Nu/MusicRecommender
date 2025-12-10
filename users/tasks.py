@@ -5,9 +5,9 @@ from datetime import timedelta
 import requests
 from .models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures
 import json
-import re
-import youtube_classifiers
 from .youtube_classifiers import compute_music_score
+from django.core.cache import cache
+from requests.exceptions import HTTPError
 
 
 @shared_task
@@ -380,8 +380,12 @@ def youtube_test_fetch(access_token, page_token=None):
     if next_page_token:
         youtube_test_fetch.delay(access_token,next_page_token)
 
-@shared_task
-def check_youtube_channel_category(access_token,channel_id):
+@shared_task(bind=True,max_retries=3)
+def check_youtube_channel_category(self,access_token,channel_id):
+    cache_key = f"music_check:{channel_id}"
+    cached_result=cache.get(cache_key)
+    if cached_result:
+        return cached_result
     url='https://www.googleapis.com/youtube/v3/channels'
     headers = {"Authorization": f"Bearer {access_token}"}
     params = {
@@ -396,6 +400,10 @@ def check_youtube_channel_category(access_token,channel_id):
     except requests.exceptions.RequestException as e:
         print(f"[check_youtube_channel_category] error: {e}")
         return
+    except HTTPError as e:
+        if e.response.status_code == 429:  # Rate limit
+            raise self.retry(exc=e, countdown=60)
+        return
 
     items=data.get('items', [])
     if not items:
@@ -403,8 +411,9 @@ def check_youtube_channel_category(access_token,channel_id):
 
     snippet=items[0].get("snippet",{})
     channel_name=snippet.get("title","Unknown")
+    channel_videos=get_recent_video_categories(channel_id,access_token)
 
-    result = compute_music_score(data, recent_video_categories=None)
+    result = compute_music_score(data, recent_video_categories=channel_videos)
 
     if result["is_music"]:
         print(
@@ -416,3 +425,34 @@ def check_youtube_channel_category(access_token,channel_id):
         )
         # TODO: database save / user connect
     return
+
+
+def get_recent_video_categories(channel_id,access_token):
+    search_url = "https://www.googleapis.com/youtube/v3/search"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {
+        "part": "snippet",
+        "channelId": channel_id,
+        "type": "video",
+        "order": "date",
+        "maxResults": 20,
+    }
+    response=requests.get(search_url,headers=headers,params=params)
+    response.raise_for_status()
+    data=response.json()
+    video_ids = [item["id"]["videoId"] for item in data.get("items", [])]
+    if not video_ids:
+        return []
+    if len(video_ids) < 5:
+        return []
+    videos_url="https://www.googleapis.com/youtube/v3/videos"
+    params={"part":"snippet", "id":",".join(video_ids)}
+    r=requests.get(videos_url,headers=headers,params=params)
+    r.raise_for_status()
+    data=r.json()
+
+    return [
+        int(item["snippet"]["categoryId"])
+        for item in data.get("items", [])
+        if "snippet" in item
+    ]
