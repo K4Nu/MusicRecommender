@@ -6,8 +6,8 @@ from djoser.serializers import UserSerializer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions, status
-from .tasks import fetch_spotify_initial_data,youtube_test_fetch
-from users.models import SpotifyAccount,UserTopItem
+from .tasks import fetch_spotify_initial_data,youtube_test_fetch,get_youtube_channel_id,check_youtube_channel_category
+from users.models import SpotifyAccount,UserTopItem,YoutubeAccount
 from rest_framework import generics
 from .serializers import UserTopTrackSerializer
 
@@ -135,7 +135,7 @@ class YoutubeConnect(APIView):
     def post(self, request):
         code = request.data.get('code')
         redirect_uri = request.data.get('redirect_uri')
-        codeVerifier = request.data.get("codeVerifier")
+        code_verifier = request.data.get("codeVerifier")
 
         if not code or not redirect_uri:
             return Response(
@@ -143,51 +143,78 @@ class YoutubeConnect(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        print(f'📥 Received params:')
-        print(f'  code: {code[:20]}...')
-        print(f'  redirect_uri: {redirect_uri}')
-        print(f'  codeVerifier: {codeVerifier[:20] if codeVerifier else None}...')
-        print(f'  client_id: {os.environ.get("YOUTUBE_CLIENT_ID")}')
-
+        # 1. Wymiana code na token
         token_url = "https://oauth2.googleapis.com/token"
         token_data = {
             'grant_type': 'authorization_code',
             'code': code,
             'redirect_uri': redirect_uri,
             'client_id': os.environ['YOUTUBE_CLIENT_ID'],
-            "code_verifier": codeVerifier,
-            "client_secret":os.environ['YOUTUBE_CLIENT_SECRET'],
+            "code_verifier": code_verifier,
+            "client_secret": os.environ['YOUTUBE_CLIENT_SECRET'],
         }
 
         try:
             token_response = requests.post(token_url, data=token_data)
-
-            print(f"📊 Google response status: {token_response.status_code}")
-            print(f"📄 Google response body: {token_response.text}")
-
-            if not token_response.ok:
-                return Response(
-                    {
-                        "detail": "Failed to exchange code for token",
-                        "status": token_response.status_code,
-                        "google_error": token_response.text
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
+            token_response.raise_for_status()  # Rzuca wyjątek dla 4xx/5xx
             token_json = token_response.json()
 
+        except requests.exceptions.HTTPError as e:
+            return Response(
+                {
+                    "detail": "Failed to exchange code for token",
+                    "status": token_response.status_code,
+                    "error": token_response.text
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         except requests.exceptions.RequestException as e:
-            print(f"❌ Request completely failed: {str(e)}")
             return Response(
                 {"detail": f"Request error: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        access_token = token_json.get("access_token")
+        refresh_token = token_json.get("refresh_token")
+        expires_in = token_json.get("expires_in", 3600)
+
+        if not access_token:
+            return Response(
+                {"detail": "No access token received"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        print(f"✅ Token received: {token_json}")
-        #here function from tasks
-        youtube_test_fetch(token_json.get("access_token"))
+        # 2. Pobierz youtube_id SYNCHRONICZNIE (szybkie, ~200ms)
+        try:
+            youtube_id = self.get_youtube_channel_id(access_token)
+        except Exception as e:
+            return Response(
+                {"detail": f"Failed to fetch YouTube channel: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 3. Oblicz datę wygaśnięcia
+        expires_at = timezone.now() + timedelta(seconds=expires_in)
+
+        # 4. Zapisz konto (POPRAWNIE!)
+        youtube_account, created = YoutubeAccount.objects.update_or_create(
+            user=request.user,  # ← lookup field (szukamy po tym)
+            defaults={          # ← wartości do ustawienia/update
+                'youtube_id': youtube_id,
+                'access_token': access_token,
+                'refresh_token': refresh_token,
+                'expires_at': expires_at,  # Zmień nazwę pola w modelu!
+            }
+        )
+
+        # 5. Uruchom klasyfikację ASYNCHRONICZNIE w tle
+        check_youtube_channel_category.delay(access_token, youtube_id)
+
         return Response(
-            {"message": "Successfully logged in."},
+            {
+                "message": "Successfully connected YouTube account",
+                "youtube_id": youtube_id,
+                "action": "created" if created else "updated"
+            },
             status=status.HTTP_200_OK,
         )

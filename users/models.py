@@ -5,6 +5,7 @@ from django.db import models
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
+from django.utils import timezone
 
 
 
@@ -230,5 +231,16 @@ class YoutubeAccount(models.Model):
     youtube_id = models.CharField(max_length=255, unique=True)
     access_token = models.CharField(max_length=512)
     refresh_token = models.CharField(max_length=512)
-    expires_in = models.DateTimeField()
+    expires_at = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def is_token_expired(self):
+        return timezone.now() > self.expires_at
+
+    def __str__(self):
+        return f"{self.user.username} - {self.youtube_id}"
+
+    class Meta:
+        verbose_name = "YouTube Account"
+        verbose_name_plural = "YouTube Accounts"
