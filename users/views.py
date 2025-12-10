@@ -143,12 +143,6 @@ class YoutubeConnect(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        print(f'📥 Received params:')
-        print(f'  code: {code[:20]}...')
-        print(f'  redirect_uri: {redirect_uri}')
-        print(f'  codeVerifier: {codeVerifier[:20] if codeVerifier else None}...')
-        print(f'  client_id: {os.environ.get("YOUTUBE_CLIENT_ID")}')
-
         token_url = "https://oauth2.googleapis.com/token"
         token_data = {
             'grant_type': 'authorization_code',
@@ -161,9 +155,6 @@ class YoutubeConnect(APIView):
 
         try:
             token_response = requests.post(token_url, data=token_data)
-
-            print(f"📊 Google response status: {token_response.status_code}")
-            print(f"📄 Google response body: {token_response.text}")
 
             if not token_response.ok:
                 return Response(

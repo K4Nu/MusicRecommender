@@ -5,6 +5,9 @@ from datetime import timedelta
 import requests
 from .models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures
 import json
+import re
+import youtube_classifiers
+from .youtube_classifiers import compute_music_score
 
 
 @shared_task
@@ -369,9 +372,47 @@ def youtube_test_fetch(access_token, page_token=None):
 
     items=data.get('items', [])
     for item in items:
-        #add here function for getting channel and then search for info
-        pass
+        current=item['snippet']['resourceId']['channelId']
+        check_youtube_channel_category.delay(access_token,current)
+
 
     next_page_token = data.get('nextPageToken')
     if next_page_token:
         youtube_test_fetch.delay(access_token,next_page_token)
+
+@shared_task
+def check_youtube_channel_category(access_token,channel_id):
+    url='https://www.googleapis.com/youtube/v3/channels'
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {
+        'part': 'snippet,topicDetails',
+        'id': channel_id,
+
+    }
+    try:
+        response=requests.get(url,headers=headers,params=params)
+        response.raise_for_status()
+        data=response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"[check_youtube_channel_category] error: {e}")
+        return
+
+    items=data.get('items', [])
+    if not items:
+        return
+
+    snippet=items[0].get("snippet",{})
+    channel_name=snippet.get("title","Unknown")
+
+    result = compute_music_score(data, recent_video_categories=None)
+
+    if result["is_music"]:
+        print(
+            f"[MUSIC] {channel_name} "
+            f"(score={result['total_score']}, "
+            f"topics={result['score_topics']}, "
+            f"text={result['score_text']}, "
+            f"videos={result['score_videos']})"
+        )
+        # TODO: database save / user connect
+    return
