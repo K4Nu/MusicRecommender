@@ -239,7 +239,7 @@ class YoutubeAccount(models.Model):
         return timezone.now() > self.expires_at
 
     def __str__(self):
-        return f"{self.user.username} - {self.youtube_id}"
+        return f"{self.user.email} - {self.youtube_id}"
 
     class Meta:
         verbose_name = "YouTube Account"
