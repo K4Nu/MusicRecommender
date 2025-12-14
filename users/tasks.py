@@ -381,7 +381,7 @@ def youtube_test_fetch(access_token, page_token=None):
         youtube_test_fetch.delay(access_token,next_page_token)
 
 @shared_task(bind=True,max_retries=3)
-def check_youtube_channel_category(self,access_token,channel_id):
+def check_youtube_channel_category(self,access_token,channel_id,user_id):
     cache_key = f"music_check:{channel_id}"
     cached_result=cache.get(cache_key)
     if cached_result:
@@ -457,21 +457,3 @@ def get_recent_video_categories(channel_id,access_token):
         if "snippet" in item
     ]
 
-def get_youtube_channel_id(access_token):
-    """Pobiera channel ID zalogowanego użytkownika"""
-    url = "https://www.googleapis.com/youtube/v3/channels"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    params = {
-        "part": "id,snippet",
-        "mine": "true"
-    }
-
-    response = requests.get(url, headers=headers, params=params)
-    response.raise_for_status()
-    data = response.json()
-
-    items = data.get("items", [])
-    if not items:
-        raise ValueError("No YouTube channel found for this account")
-
-    return items[0]["id"]

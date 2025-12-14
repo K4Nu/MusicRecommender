@@ -6,7 +6,7 @@ from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
-
+from datetime import timedelta
 
 
 class MyUserManager(BaseUserManager):
@@ -68,6 +68,13 @@ class SpotifyAccount(models.Model):
 
     def __str__(self):
         return self.user.email
+
+    def update_tokens(self, access_token, refresh_token=None, expires_in=3600):
+        self.access_token = access_token
+        if refresh_token:
+            self.refresh_token = refresh_token
+        self.expires_at = timezone.now() + timedelta(seconds=expires_in)
+        self.save()
 
 class Genre(models.Model):
     name=models.CharField(max_length=255)
@@ -239,7 +246,7 @@ class YoutubeAccount(models.Model):
         return timezone.now() > self.expires_at
 
     def __str__(self):
-        return f"{self.user.username} - {self.youtube_id}"
+        return f"{self.user.email} - {self.youtube_id}"
 
     class Meta:
         verbose_name = "YouTube Account"
