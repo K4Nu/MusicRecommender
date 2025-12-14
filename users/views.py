@@ -114,7 +114,7 @@ class UserTopTracks(APIView):
 
         data=[{
             "rank":item.rank,
-            "name":item.name,
+            "name":item.track.name,
             "artists":[a.name for a in item.track.artists.all()],
             "image_url":item.track.image_url,
             "spotify_id":item.track.spotify_id,
@@ -159,14 +159,11 @@ class SpotifyRefreshTokenView(APIView):
             token_response.raise_for_status()
             token_json = token_response.json()
 
-            # Upadate access token
-            spotify_account.access_token = token_json['access_token']
+            access_token = token_json.get('access_token')
+            refresh_token = token_json.get('refresh_token')
+            expires_in = token_json.get('expires_in', 3600)
 
-
-            if 'refresh_token' in token_json:
-                spotify_account.refresh_token = token_json['refresh_token']
-
-            spotify_account.save()  # save the instance
+            spotify_account.update_tokens(access_token=access_token, refresh_token=refresh_token, expires_in=expires_in)
 
             return Response(
                 {
