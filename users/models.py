@@ -69,6 +69,9 @@ class SpotifyAccount(models.Model):
     def __str__(self):
         return self.user.email
 
+    def is_expired(self):
+        return self.expires_at <= timezone.now()
+
     def update_tokens(self, access_token, refresh_token=None, expires_in=3600):
         self.access_token = access_token
         if refresh_token:

@@ -1,7 +1,7 @@
 import os
 from datetime import timedelta
 from http import HTTPStatus
-
+from .services import ensure_valid_external_tokens
 import requests
 from django.utils import timezone
 from djoser.serializers import UserSerializer
@@ -322,4 +322,15 @@ class YoutubeConnect(APIView):
             raise ValueError("No YouTube channel found for this account")
 
         return items[0]["id"]
+
+class RecommendationsView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        ensure_valid_external_tokens(self.request.user)
+
+        return Response(
+            {"detail":"Tokens valid, Recommendations placeholder",
+             },status=200
+        )
 
