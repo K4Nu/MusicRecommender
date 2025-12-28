@@ -273,7 +273,7 @@ class YoutubeConnect(APIView):
         # Zapisz konto
         expires_at = timezone.now() + timedelta(seconds=expires_in)
 
-        from .models import YoutubeAccount
+
         youtube_account, created = YoutubeAccount.objects.update_or_create(
             user=request.user,
             defaults={
