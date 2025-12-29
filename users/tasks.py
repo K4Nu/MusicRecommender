@@ -145,58 +145,86 @@ def fetch_top_items(headers, item_type, time_range, user_id):
 
 def fetch_recently_played(headers, user_id):
     """
-    Pobiera ostatnio słuchane utwory (max 50).
+    Saves last 50 played songs by user
     """
     url = "https://api.spotify.com/v1/me/player/recently-played"
-    params = {'limit': 50}
+    params = {"limit": 50}
 
     try:
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
         data = response.json()
 
-        items = data.get('items', [])
-        user = SpotifyAccount.objects.get(id=user_id).user
-        print(f"Fetched {len(items)} recently played tracks for user {user_id}")
+        items = data.get("items", [])
+        spotify_account = SpotifyAccount.objects.get(id=user_id)
+        user = spotify_account.user
 
-        last_tracks = []
+        # ----------------------------------
+        # LAST LISTENED TRACK
+        # ----------------------------------
+        last_event = (
+            ListeningHistory.objects
+            .filter(user=user)
+            .order_by("-played_at")
+            .first()
+        )
 
+        last_played_at = last_event.played_at if last_event else None
+
+        history_events = []
+
+        # ----------------------------------
+        # ITERATE RECENTLY PLAYED
+        # ----------------------------------
         for item in items:
-            track_data = item.get('track')
-            if not track_data:
+            played_at = item.get("played_at")
+            track_data = item.get("track")
+
+            if not played_at or not track_data:
                 continue
 
-            current_track_id = track_data.get('id')
-            if not current_track_id:
+            # Spotify zwraca od najnowszych → gdy trafimy na stare, kończymy
+            if last_played_at and played_at <= last_played_at:
+                break
+
+            track_id = track_data.get("id")
+            if not track_id:
                 continue
-            current_track_object=None
+
+            # ----------------------------------
+            # TRACK
+            # ----------------------------------
             try:
-                current_track_object = Track.objects.get(
-                    spotify_id=current_track_id
-                )
-                continue
+                track = Track.objects.get(spotify_id=track_id)
             except Track.DoesNotExist:
-                pass
-            if current_track_object is None:
-                current_artists = track_data.get('artists', [])
-                artists = save_artists(current_artists)
-                current_track_object=Track(
-                    spotify_id=current_track_id,
-                    duration_ms=track_data.get('duration_ms'),
-                    popularity=track_data.get('popularity'),
-                    name=track_data.get('name'),
+                artists = save_artists(track_data.get("artists", []))
+
+                track = Track.objects.create(
+                    spotify_id=track_id,
+                    name=track_data.get("name"),
+                    duration_ms=track_data.get("duration_ms"),
+                    popularity=track_data.get("popularity"),
                 )
-                current_track_object.artists.add(*artists)
-            last_tracks.append(
+                track.artists.add(*artists)
+
+            # ----------------------------------
+            # LISTENING EVENT
+            # ----------------------------------
+            history_events.append(
                 ListeningHistory(
                     user=user,
-                    track=current_track_object,
-                    played_at=track_data.get('played_at'),
+                    track=track,
+                    played_at=played_at,
                 )
             )
-        if last_tracks:
-            ListeningHistory.objects.bulk_create(last_tracks)
 
+        # ----------------------------------
+        # BULK INSERT
+        # ----------------------------------
+        if history_events:
+            ListeningHistory.objects.bulk_create(history_events)
+
+        print(f"Saved {len(history_events)} new listening events for user {user.id}")
 
     except requests.exceptions.RequestException as e:
         print(f"Failed to fetch recently played: {e}")
