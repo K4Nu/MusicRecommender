@@ -135,9 +135,15 @@ class UserTopItem(models.Model):
     unique_together = ["user","item_type","time_range","rank"]
 
 class ListeningHistory(models.Model):
+    class EventType(models.TextChoices):
+        LISTEN = "LISTEN", "Listen"
+        LIKE = "LIKE", "Like"
+        PLAYLIST = "PLAYLIST", "Playlist add"
+
     user=models.ForeignKey(User, on_delete=models.CASCADE, related_name='listening_history')
     track=models.ForeignKey(Track, on_delete=models.CASCADE)
     played_at=models.DateTimeField()
+    event_type=models.CharField(max_length=20, choices=EventType.choices,default=EventType.LISTEN)
 
     class Meta:
         ordering = ['-played_at']

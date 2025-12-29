@@ -3,7 +3,7 @@ from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta
 import requests
-from .models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures
+from .models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory
 import json
 from .youtube_classifiers import compute_music_score
 from django.core.cache import cache
@@ -116,7 +116,6 @@ def fetch_top_items(headers, item_type, time_range, user_id):
         items = data.get('items', [])
         print(f"Fetched {len(items)} top {item_type} ({time_range}) for user {user_id}")
 
-        # TODO: Zapisz do bazy danych
         user=User.objects.filter(id=user_id)
         UserTopItem.objects.filter(user=user,
                                    item_type=item_type[:-1],
@@ -146,22 +145,86 @@ def fetch_top_items(headers, item_type, time_range, user_id):
 
 def fetch_recently_played(headers, user_id):
     """
-    Pobiera ostatnio słuchane utwory (max 50).
+    Saves last 50 played songs by user
     """
     url = "https://api.spotify.com/v1/me/player/recently-played"
-    params = {'limit': 50}
+    params = {"limit": 50}
 
     try:
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
         data = response.json()
 
-        items = data.get('items', [])
-        print(f"Fetched {len(items)} recently played tracks for user {user_id}")
+        items = data.get("items", [])
+        spotify_account = SpotifyAccount.objects.get(id=user_id)
+        user = spotify_account.user
 
-        # TODO: Zapisz do bazy danych
-        # for item in items:
-        #     save_listening_history(item, user_id)
+        # ----------------------------------
+        # LAST LISTENED TRACK
+        # ----------------------------------
+        last_event = (
+            ListeningHistory.objects
+            .filter(user=user)
+            .order_by("-played_at")
+            .first()
+        )
+
+        last_played_at = last_event.played_at if last_event else None
+
+        history_events = []
+
+        # ----------------------------------
+        # ITERATE RECENTLY PLAYED
+        # ----------------------------------
+        for item in items:
+            played_at = item.get("played_at")
+            track_data = item.get("track")
+
+            if not played_at or not track_data:
+                continue
+
+            # Spotify zwraca od najnowszych → gdy trafimy na stare, kończymy
+            if last_played_at and played_at <= last_played_at:
+                break
+
+            track_id = track_data.get("id")
+            if not track_id:
+                continue
+
+            # ----------------------------------
+            # TRACK
+            # ----------------------------------
+            try:
+                track = Track.objects.get(spotify_id=track_id)
+            except Track.DoesNotExist:
+                artists = save_artists(track_data.get("artists", []))
+
+                track = Track.objects.create(
+                    spotify_id=track_id,
+                    name=track_data.get("name"),
+                    duration_ms=track_data.get("duration_ms"),
+                    popularity=track_data.get("popularity"),
+                )
+                track.artists.add(*artists)
+
+            # ----------------------------------
+            # LISTENING EVENT
+            # ----------------------------------
+            history_events.append(
+                ListeningHistory(
+                    user=user,
+                    track=track,
+                    played_at=played_at,
+                )
+            )
+
+        # ----------------------------------
+        # BULK INSERT
+        # ----------------------------------
+        if history_events:
+            ListeningHistory.objects.bulk_create(history_events)
+
+        print(f"Saved {len(history_events)} new listening events for user {user.id}")
 
     except requests.exceptions.RequestException as e:
         print(f"Failed to fetch recently played: {e}")
@@ -183,8 +246,8 @@ def fetch_saved_tracks(headers, user_id):
             data = response.json()
 
             all_tracks.extend(data.get('items', []))
-            url = data.get('next')  # Kolejna strona lub None
-            params = {}  # Usuń params, bo 'next' ma już wszystko w URL
+            url = data.get('next')
+            params = {}
 
         print(f"Fetched {len(all_tracks)} saved tracks for user {user_id}")
 
@@ -220,16 +283,33 @@ def fetch_playlists(headers, user_id):
 
     print(json.dumps(playlists, indent=2))
 
-def save_artist(artist_data):
+def save_artists(artists_data):
+    """
+      artists_data: list of Spotify SimplifiedArtistObject
+      returns: list[Artist]
+      """
+    spotify_ids = [a["id"] for a in artists_data]
 
-    artist,created=Artist.objects.update_or_create(
-        spotify_id=artist_data.get('id'),
-        name=artist_data.get('name'),
-        popularity=artist_data.get('popularity'),
-        image_uri=artist_data.get('images')[0].get('uri') if artist_data.get('images') else None,
-    )
+    existing_artists = {
+        a.spotify_id: a
+        for a in Artist.objects.filter(spotify_id__in=spotify_ids)
+    }
 
-    return artist
+    to_create = []
+
+    for art in artists_data:
+        if art["id"] not in existing_artists:
+            to_create.append(
+                Artist(
+                    spotify_id=art["id"],
+                    name=art["name"],
+                )
+            )
+    if to_create:
+        Artist.objects.bulk_create(to_create)
+
+    return list(Artist.objects.filter(spotify_id__in=spotify_ids))
+
 
 def save_track(track_data):
     track,created=Track.objects.update_or_create(
@@ -245,9 +325,8 @@ def save_track(track_data):
     )
     if created:
         for artist_data in track_data.get('artists'):
-            artist=save_artist(artist_data)
+            artist=save_artists(artist_data)
             track.artists.add(artist)
-
         return track
 
 @shared_task
