@@ -3,6 +3,8 @@ from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta
 import requests
+from sqlparse.utils import offset
+
 from .models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory
 import json
 from .youtube_classifiers import compute_music_score
@@ -123,7 +125,7 @@ def fetch_top_items(headers, item_type, time_range, user_id):
 
         for rank,item in enumerate(items,start=1):
             if item_type == 'artists':
-                artist=save_artist(item)
+                artist=save_artists(item)
                 UserTopItem.objects.create(user=user,
                                            item_type="artist",
                                            time_range=time_range,
@@ -143,7 +145,7 @@ def fetch_top_items(headers, item_type, time_range, user_id):
         print(f"Failed to fetch top {item_type} ({time_range}): {e}")
 
 
-def fetch_recently_played(headers, user_id):
+def fetch_recently_played(headers, user):
     """
     Saves last 50 played songs by user
     """
@@ -156,7 +158,7 @@ def fetch_recently_played(headers, user_id):
         data = response.json()
 
         items = data.get("items", [])
-        spotify_account = SpotifyAccount.objects.get(id=user_id)
+        spotify_account = SpotifyAccount.objects.get(user=user)
         user = spotify_account.user
 
         # ----------------------------------
@@ -183,7 +185,6 @@ def fetch_recently_played(headers, user_id):
             if not played_at or not track_data:
                 continue
 
-            # Spotify zwraca od najnowszych → gdy trafimy na stare, kończymy
             if last_played_at and played_at <= last_played_at:
                 break
 
@@ -236,25 +237,29 @@ def fetch_saved_tracks(headers, user_id):
     Może być ich dużo - użyj paginacji.
     """
     url = "https://api.spotify.com/v1/me/tracks"
-    params = {'limit': 50}
+    idx=0
+    limit=50
     all_tracks = []
 
     try:
-        while url:
+        while True:
+            params = {'limit': limit,offset:limit*idx}
             response = requests.get(url, headers=headers, params=params)
             response.raise_for_status()
             data = response.json()
 
             all_tracks.extend(data.get('items', []))
-            url = data.get('next')
-            params = {}
 
-        print(f"Fetched {len(all_tracks)} saved tracks for user {user_id}")
+            url = data.get('next')
+
+
+
 
         # TODO: Zapisz do bazy danych
         # for item in all_tracks:
         #     save_saved_track(item, user_id)
-
+            idx+=1
+        print(f"Fetched {len(all_tracks)} saved tracks for user {user_id}")
     except requests.exceptions.RequestException as e:
         print(f"Failed to fetch saved tracks: {e}")
 
