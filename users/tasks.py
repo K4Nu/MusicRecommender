@@ -4,7 +4,7 @@ from django.utils import timezone
 from datetime import timedelta
 import requests
 from sqlparse.utils import offset
-
+from datetime import datetime, timezone
 from .models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory
 import json
 from .youtube_classifiers import compute_music_score
@@ -179,9 +179,9 @@ def fetch_recently_played(headers, user):
         # ITERATE RECENTLY PLAYED
         # ----------------------------------
         for item in items:
-            played_at = item.get("played_at")
+            played_at = datetime.fromisoformat(item.get("played_at").replace("Z", "+00:00"))
             track_data = item.get("track")
-
+            print(played_at)
             if not played_at or not track_data:
                 continue
 

@@ -148,6 +148,9 @@ class ListeningHistory(models.Model):
     class Meta:
         ordering = ['-played_at']
 
+    def __str__(self):
+        return f'{self.user.email} {self.event_type} {self.played_at} {self.track.name}'
+
 
 class AudioFeatures(models.Model):
     track = models.OneToOneField(

@@ -334,3 +334,23 @@ class RecommendationsView(APIView):
              },status=200
         )
 
+class TestCelery(APIView):
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from .tasks import fetch_recently_played
+        spotify_account=SpotifyAccount.objects.get(user=self.request.user)
+        if not spotify_account:
+            return Response(
+                {"detail": "No spotify account found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        access_token=spotify_account.access_token
+        headers = {"Authorization": f"Bearer {access_token}"}
+        fetch_recently_played(headers,request.user.id)
+
+        return Response(
+            {"detail":"Tokens valid, Recommendations placeholder",
+             },status=200
+        )
