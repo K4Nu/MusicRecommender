@@ -1,4 +1,3 @@
-# Recommender/middleware.py
 from django.conf import settings
 
 class JWTAuthCookieMiddleware:
