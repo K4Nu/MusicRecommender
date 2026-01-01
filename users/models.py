@@ -95,12 +95,40 @@ class Artist(models.Model):
     def __str__(self):
         return self.name
 
+class Album(models.Model):
+    class AlbumTypes(models.TextChoices):
+        ALBUM = "album", "Album"
+        SINGLE = "single", "Single"
+        COMPILATION = "compilation", "Compilation"
+
+    spotify_id = models.CharField(max_length=255, unique=True)
+    name = models.CharField(max_length=255)
+
+    album_type = models.CharField(
+        max_length=20,
+        choices=AlbumTypes.choices,
+        default=AlbumTypes.ALBUM
+    )
+
+    release_date = models.DateTimeField(null=True, blank=True)
+
+    artists = models.ManyToManyField(
+        Artist,
+        related_name="albums"
+    )
+
+    image_url = models.URLField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
 
 class Track(models.Model):
     spotify_id = models.CharField(max_length=255, unique=True)
     name=models.CharField(max_length=255)
     artists=models.ManyToManyField(Artist, related_name='tracks')
-    album_name=models.CharField(max_length=255)
+    album_name=models.ForeignKey(Album, on_delete=models.CASCADE, related_name='tracks')
     duration_ms=models.IntegerField()
     popularity=models.IntegerField(null=True)
     preview_url=models.URLField(null=True,blank=True)
