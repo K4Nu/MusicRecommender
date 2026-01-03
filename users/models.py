@@ -2,6 +2,7 @@ from django.contrib.auth.models import BaseUserManager
 from django.contrib.auth.models import AbstractBaseUser
 from django.contrib.auth.models import PermissionsMixin
 from django.db import models
+from django.db.models import Q
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -153,14 +154,24 @@ class UserTopItem(models.Model):
     item_type = models.CharField(max_length=255, choices=ITEM_TYPE_CHOICES)
     time_range = models.CharField(max_length=20, choices=TIME_RANGE_CHOICES)
 
-    artist = models.ForeignKey(Artist, on_delete=models.CASCADE)
-    track = models.ForeignKey(Track, on_delete=models.CASCADE)
+    artist = models.ForeignKey(Artist, on_delete=models.CASCADE,null=True,blank=True)
+    track = models.ForeignKey(Track, on_delete=models.CASCADE,null=True,blank=True)
 
     rank = models.IntegerField()
     fetched_at=models.DateTimeField(auto_now_add=True)
 
     ordering =[ "rank"]
     unique_together = ["user","item_type","time_range","rank"]
+
+    constraints = [
+        models.CheckConstraint(
+            check=(
+                    models.Q(artist__isnull=False, track__isnull=True) |
+                    models.Q(artist__isnull=True, track__isnull=False)
+            ),
+            name='either_artist_or_track_not_both'
+        )
+    ]
 
 class ListeningHistory(models.Model):
     class EventType(models.TextChoices):
