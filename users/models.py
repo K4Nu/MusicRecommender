@@ -313,7 +313,11 @@ class SpotifyPlaylist(models.Model):
 
     # Snapshot ID
     snapshot_id = models.CharField(max_length=100, blank=True)
-
+    tracks_snapshot_id = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True
+    )
     class Meta:
         ordering = ['-updated_at']
         verbose_name = 'Spotify Playlist'

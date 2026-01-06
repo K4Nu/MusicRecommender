@@ -3,7 +3,7 @@ from django.utils import timezone
 from datetime import timedelta, datetime
 import requests
 from .models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory, Album, \
-    SpotifyPlaylist
+    SpotifyPlaylist, SpotifyPlaylistTrack
 import json
 from django.core.cache import cache
 from requests.exceptions import HTTPError
@@ -265,14 +265,13 @@ def fetch_saved_tracks(headers, user_id):
 
 @shared_task
 def sync_user_playlists(user_id):
-    fetch_spotify_playlists.delay(user_id)
+    fetch_spotify_playlists(user_id)
 
     playlists=SpotifyPlaylist.objects.filter(user_id=user_id)
     for playlist in playlists:
         fetch_playlist_tracks.delay(playlist.id)
     return
 
-@shared_task
 def fetch_spotify_playlists(user_id):
     user = User.objects.get(id=user_id)
     spotify = ensure_spotify_token(user)
@@ -348,6 +347,73 @@ def fetch_spotify_playlists(user_id):
                 "last_synced_at",
             ]
         )
+
+@shared_task(bind=True, max_retries=3)
+def fetch_playlist_tracks(self, playlist_id):
+    try:
+        playlist = SpotifyPlaylist.objects.get(id=playlist_id)
+    except SpotifyPlaylist.DoesNotExist:
+        return
+
+    # 🔑 snapshot check
+    if playlist.tracks_snapshot_id == playlist.snapshot_id:
+        return
+
+    spotify = ensure_spotify_token(playlist.user)
+    if not spotify:
+        return
+
+    headers = {"Authorization": f"Bearer {spotify.access_token}"}
+    url = f"https://api.spotify.com/v1/playlists/{playlist.spotify_id}/tracks"
+
+    SpotifyPlaylistTrack.objects.filter(playlist=playlist).delete()
+
+    relations = []
+    position = 0
+
+    while url:
+        try:
+            r = requests.get(
+                url,
+                headers=headers,
+                params={"limit": 100},
+                timeout=15
+            )
+            r.raise_for_status()
+            data = r.json()
+        except requests.exceptions.RequestException as e:
+            raise self.retry(exc=e, countdown=30)
+
+        for item in data.get("items", []):
+            track_data = item.get("track")
+            if not track_data or not track_data.get("id"):
+                continue
+
+            track = save_track(track_data)
+            if not track:
+                continue
+
+            relations.append(
+                SpotifyPlaylistTrack(
+                    playlist=playlist,
+                    track=track,
+                    position=position,
+                    added_at=item.get("added_at"),
+                )
+            )
+            position += 1
+
+        url = data.get("next")
+
+    # ✅ JEDEN INSERT
+    if relations:
+        SpotifyPlaylistTrack.objects.bulk_create(relations)
+
+    playlist.tracks_snapshot_id = playlist.snapshot_id
+    playlist.last_synced_at = timezone.now()
+    playlist.save(
+        update_fields=["tracks_snapshot_id", "last_synced_at"]
+    )
 
 
 def save_artists_bulk(artists_data):
