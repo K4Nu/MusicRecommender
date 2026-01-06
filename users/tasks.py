@@ -1,16 +1,29 @@
-# users/tasks.py
 from celery import shared_task
 from django.utils import timezone
-from datetime import timedelta
+from datetime import timedelta, datetime
 import requests
-from sqlparse.utils import offset
-from datetime import datetime, timezone
-from .models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory
+from .models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory, Album
 import json
-from .youtube_classifiers import compute_music_score
 from django.core.cache import cache
 from requests.exceptions import HTTPError
+import os
+from .services import ensure_spotify_token
+from .youtube_classifiers import compute_music_score
+from datetime import date
 
+def parse_spotify_release_date(value: str):
+    if not value:
+        return None
+
+    if len(value) == 4:          # YYYY
+        return date(int(value), 1, 1)
+    if len(value) == 7:          # YYYY-MM
+        year, month = value.split("-")
+        return date(int(year), int(month), 1)
+    if len(value) == 10:         # YYYY-MM-DD
+        return date.fromisoformat(value)
+
+    return None
 
 @shared_task
 def fetch_spotify_initial_data(user_id):
@@ -23,8 +36,10 @@ def fetch_spotify_initial_data(user_id):
         print(f"SpotifyAccount not found for user {user_id}")
         return
 
-    # Sprawdź czy token jest świeży
-    access_token = get_valid_token(spotify_account)
+    spotify=ensure_spotify_token(spotify_account.user)
+    if not spotify:
+        return
+    access_token = spotify.access_token
     if not access_token:
         print(f"Failed to get valid token for user {user_id}")
         return
@@ -57,95 +72,111 @@ def fetch_spotify_initial_data(user_id):
     print(f"✅ Initial Spotify data fetched for user {user_id}")
 
 
-def get_valid_token(spotify_account):
-    """
-    Zwraca ważny access_token, odświeża jeśli wygasł.
-    """
-    # Jeśli token jest świeży
-    if spotify_account.expires_at > timezone.now():
-        return spotify_account.access_token
-
-    # Odśwież token
-    token_url = "https://accounts.spotify.com/api/token"
-    data = {
-        'grant_type': 'refresh_token',
-        'refresh_token': spotify_account.refresh_token,
-    }
-
-    import os
-    auth = (os.environ.get('SPOTIFY_CLIENT_ID'), os.environ.get('SPOTIFY_CLIENT_SECRET'))
-
-    try:
-        response = requests.post(token_url, data=data, auth=auth)
-        response.raise_for_status()
-        token_data = response.json()
-
-        # Zaktualizuj token w bazie
-        spotify_account.access_token = token_data['access_token']
-        spotify_account.expires_at = timezone.now() + timedelta(seconds=token_data['expires_in'])
-
-        # Czasami Spotify zwraca nowy refresh_token
-        if 'refresh_token' in token_data:
-            spotify_account.refresh_token = token_data['refresh_token']
-
-        spotify_account.save()
-
-        return spotify_account.access_token
-
-    except requests.exceptions.RequestException as e:
-        print(f"Failed to refresh token: {e}")
-        return None
-
-
 def fetch_top_items(headers, item_type, time_range, user_id):
     """
-    Pobiera top artists lub tracks dla danego time_range.
-    item_type: 'artists' lub 'tracks'
-    time_range: 'short_term', 'medium_term', 'long_term'
+    Pobiera top artists lub tracks - ZOPTYMALIZOWANA WERSJA
     """
     url = f"https://api.spotify.com/v1/me/top/{item_type}"
-    params = {
-        'time_range': time_range,
-        'limit': 50,  # max 50
-    }
+    params = {'time_range': time_range, 'limit': 50}
 
     try:
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
         data = response.json()
 
-
         items = data.get('items', [])
         print(f"Fetched {len(items)} top {item_type} ({time_range}) for user {user_id}")
 
-        user=User.objects.filter(id=user_id)
-        UserTopItem.objects.filter(user=user,
-                                   item_type=item_type[:-1],
-                                   time_range=time_range).delete()
+        user = User.objects.get(id=user_id)  # ✅ .get() zamiast .filter()
 
-        for rank,item in enumerate(items,start=1):
+        UserTopItem.objects.filter(
+            user=user,
+            item_type=item_type[:-1],
+            time_range=time_range
+        ).delete()
+
+        # ============================================
+        # FETCH ALL IDs
+        # ============================================
+        if item_type == 'artists':
+            all_artist_ids = [item['id'] for item in items]
+            all_artists_data = items
+        else:
+            all_artist_ids = []
+            all_track_ids = [item['id'] for item in items]
+            all_artists_data = []
+            seen_ids = set()
+
+            for item in items:
+                for artist_data in item.get('artists', []):
+                    if artist_data['id'] not in seen_ids:
+                        all_artists_data.append(artist_data)
+                        seen_ids.add(artist_data['id'])
+                        all_artist_ids.append(artist_data['id'])
+
+        # ============================================
+        # BULK SAVE ARTISTS
+        # ============================================
+        save_artists_bulk(all_artists_data)
+
+        artists_cache = {
+            a.spotify_id: a
+            for a in Artist.objects.filter(spotify_id__in=all_artist_ids)
+        }
+
+        # ============================================
+        # BULK SAVE TRACKS
+        # ============================================
+        tracks_cache = {}
+        if item_type == 'tracks':
+            for item in items:
+                track=save_track(item)
+                if track:
+                    tracks_cache[item["id"]] = track
+
+
+        # ============================================
+        # BULK CREATE UserTopItems
+        # ============================================
+        top_items_to_create = []
+
+        for rank, item in enumerate(items, start=1):
             if item_type == 'artists':
-                artist=save_artists(item)
-                UserTopItem.objects.create(user=user,
-                                           item_type="artist",
-                                           time_range=time_range,
-                                           rank=rank,)
+                artist = artists_cache.get(item['id'])
+                if artist:
+                    top_items_to_create.append(
+                        UserTopItem(
+                            user=user,
+                            item_type="artist",
+                            time_range=time_range,
+                            artist=artist,
+                            track=None,
+                            rank=rank
+                        )
+                    )
             else:
-                track = save_track(item)
-                UserTopItem.objects.create(
-                    user=user,
-                    item_type='track',
-                    time_range=time_range,
-                    track=track,
-                    rank=rank
-                )
+                track = tracks_cache.get(item['id'])
+                if track:
+                    top_items_to_create.append(
+                        UserTopItem(
+                            user=user,
+                            item_type='track',
+                            time_range=time_range,
+                            track=track,
+                            artist=None,
+                            rank=rank
+                        )
+                    )
 
+        if top_items_to_create:
+            UserTopItem.objects.bulk_create(top_items_to_create)
+            print(f"✅ Bulk created {len(top_items_to_create)} items")
 
     except requests.exceptions.RequestException as e:
         print(f"Failed to fetch top {item_type} ({time_range}): {e}")
 
 
-def fetch_recently_played(headers, user):
+def fetch_recently_played(headers, user_id):
     """
     Saves last 50 played songs by user
     """
@@ -158,12 +189,8 @@ def fetch_recently_played(headers, user):
         data = response.json()
 
         items = data.get("items", [])
-        spotify_account = SpotifyAccount.objects.get(user=user)
-        user = spotify_account.user
+        user = User.objects.get(id=user_id)
 
-        # ----------------------------------
-        # LAST LISTENED TRACK
-        # ----------------------------------
         last_event = (
             ListeningHistory.objects
             .filter(user=user)
@@ -172,16 +199,12 @@ def fetch_recently_played(headers, user):
         )
 
         last_played_at = last_event.played_at if last_event else None
-
         history_events = []
 
-        # ----------------------------------
-        # ITERATE RECENTLY PLAYED
-        # ----------------------------------
         for item in items:
             played_at = datetime.fromisoformat(item.get("played_at").replace("Z", "+00:00"))
             track_data = item.get("track")
-            print(played_at)
+
             if not played_at or not track_data:
                 continue
 
@@ -192,25 +215,10 @@ def fetch_recently_played(headers, user):
             if not track_id:
                 continue
 
-            # ----------------------------------
-            # TRACK
-            # ----------------------------------
-            try:
-                track = Track.objects.get(spotify_id=track_id)
-            except Track.DoesNotExist:
-                artists = save_artists(track_data.get("artists", []))
+            track=save_track(track_data)
+            if not track:
+                continue
 
-                track = Track.objects.create(
-                    spotify_id=track_id,
-                    name=track_data.get("name"),
-                    duration_ms=track_data.get("duration_ms"),
-                    popularity=track_data.get("popularity"),
-                )
-                track.artists.add(*artists)
-
-            # ----------------------------------
-            # LISTENING EVENT
-            # ----------------------------------
             history_events.append(
                 ListeningHistory(
                     user=user,
@@ -219,13 +227,10 @@ def fetch_recently_played(headers, user):
                 )
             )
 
-        # ----------------------------------
-        # BULK INSERT
-        # ----------------------------------
         if history_events:
             ListeningHistory.objects.bulk_create(history_events)
 
-        print(f"Saved {len(history_events)} new listening events for user {user.id}")
+        print(f"Saved {len(history_events)} new listening events for user {user_id}")
 
     except requests.exceptions.RequestException as e:
         print(f"Failed to fetch recently played: {e}")
@@ -233,33 +238,26 @@ def fetch_recently_played(headers, user):
 
 def fetch_saved_tracks(headers, user_id):
     """
-    Pobiera zapisane utwory (liked songs).
-    Może być ich dużo - użyj paginacji.
+    Pobiera zapisane utwory (liked songs) z paginacją.
     """
     url = "https://api.spotify.com/v1/me/tracks"
-    idx=0
-    limit=50
-    all_tracks = []
 
     try:
-        while True:
-            params = {'limit': limit,offset:limit*idx}
+        while url:  # ✅ Pętla dopóki jest URL
+            params = {'limit': 50}
             response = requests.get(url, headers=headers, params=params)
             response.raise_for_status()
             data = response.json()
+            items = data.get('items', [])
 
-            all_tracks.extend(data.get('items', []))
+            for item in items:
+                track_data=item.get("track")
+                if track_data:
+                    save_track(track_data)
+            url = data.get('next')  # ✅ None finish the loop
 
-            url = data.get('next')
+        print(f"Fetched saved tracks for user {user_id}")
 
-
-
-
-        # TODO: Zapisz do bazy danych
-        # for item in all_tracks:
-        #     save_saved_track(item, user_id)
-            idx+=1
-        print(f"Fetched {len(all_tracks)} saved tracks for user {user_id}")
     except requests.exceptions.RequestException as e:
         print(f"Failed to fetch saved tracks: {e}")
 
@@ -279,64 +277,208 @@ def fetch_playlists(headers, user_id):
         playlists = data.get('items', [])
         print(f"Fetched {len(playlists)} playlists for user {user_id}")
 
-        # TODO: Zapisz do bazy danych
-        # for playlist in playlists:
-        #     save_playlist(playlist, user_id)
-
     except requests.exceptions.RequestException as e:
         print(f"Failed to fetch playlists: {e}")
 
-    print(json.dumps(playlists, indent=2))
+
+def save_artists_bulk(artists_data):
+    """
+    Bulk save artists - tylko dla LISTY
+    """
+    if not artists_data:
+        return
+
+    spotify_ids = [a['id'] for a in artists_data]
+
+    existing_ids = set(
+        Artist.objects.filter(spotify_id__in=spotify_ids)
+        .values_list("spotify_id", flat=True)
+    )
+
+    to_create = [
+        Artist(spotify_id=a['id'], name=a['name'])
+        for a in artists_data
+        if a['id'] not in existing_ids
+    ]
+
+    if to_create:
+        Artist.objects.bulk_create(to_create, ignore_conflicts=True)
+
 
 def save_artists(artists_data):
     """
-      artists_data: list of Spotify SimplifiedArtistObject
-      returns: list[Artist]
-      """
-    spotify_ids = [a["id"] for a in artists_data]
+    WRAPPER - obsługuje dict LUB list
+    """
+    if not artists_data:
+        return [] if isinstance(artists_data, list) else None
 
-    existing_artists = {
-        a.spotify_id: a
-        for a in Artist.objects.filter(spotify_id__in=spotify_ids)
-    }
-
-    to_create = []
-
-    for art in artists_data:
-        if art["id"] not in existing_artists:
-            to_create.append(
-                Artist(
-                    spotify_id=art["id"],
-                    name=art["name"],
-                )
-            )
-    if to_create:
-        Artist.objects.bulk_create(to_create)
-
-    return list(Artist.objects.filter(spotify_id__in=spotify_ids))
+    if isinstance(artists_data, list):
+        save_artists_bulk(artists_data)
+        spotify_ids = [a["id"] for a in artists_data]
+        return list(Artist.objects.filter(spotify_id__in=spotify_ids))
+    else:
+        save_artists_bulk([artists_data])
+        return Artist.objects.get(spotify_id=artists_data["id"])
 
 
 def save_track(track_data):
-    track,created=Track.objects.update_or_create(
-        spotify_id=track_data.get('id'),
+    """
+    Zapisuje track wraz z artystami i albumem
+    """
+    if not track_data or not track_data.get("id"):
+        return None
+
+    # =========================
+    # ALBUM
+    # =========================
+    album = None
+    album_data = track_data.get("album")
+
+    if album_data and album_data.get("id"):
+        album, _ = Album.objects.update_or_create(
+            spotify_id=album_data["id"],
+            defaults={
+                "name": album_data.get("name"),
+                "album_type": album_data.get(
+                    "album_type", Album.AlbumTypes.ALBUM
+                ),
+                "release_date": parse_spotify_release_date(
+                    album_data.get("release_date")
+                ),
+                "image_url": album_data["images"][0]["url"]
+                if album_data.get("images") else None,
+            }
+        )
+
+        album_artists = save_artists(album_data.get("artists", []))
+        if album_artists:
+            album.artists.set(album_artists)
+
+    # =========================
+    # TRACK
+    # =========================
+    track, _ = Track.objects.update_or_create(
+        spotify_id=track_data["id"],
         defaults={
-            "name":track_data.get('name'),
-            "album_name":track_data.get('album_name'),
-            "duration_ms":track_data.get('duration_ms'),
-            "popularity":track_data.get('popularity'),
-            "preview_url":track_data.get('preview_url'),
-                        'image_url': track_data['album']['images'][0]['url'] if track_data['album'].get('images') else None,
+            "name": track_data.get("name"),
+            "duration_ms": track_data.get("duration_ms"),
+            "popularity": track_data.get("popularity"),
+            "preview_url": track_data.get("preview_url"),
+            "image_url": album.image_url if album else None,
+            "album": album,
         }
     )
-    if created:
-        for artist_data in track_data.get('artists'):
-            artist=save_artists(artist_data)
-            track.artists.add(artist)
-        return track
 
+    # =========================
+    # TRACK ARTISTS
+    # =========================
+    track_artists = save_artists(track_data.get("artists", []))
+    if track_artists:
+        track.artists.set(track_artists)
+
+
+    return track
+
+
+def save_albums_bulk(albums_data):
+    if not albums_data:
+        return
+
+    # ============================
+    # FETCH SPOTIFY_IDS
+    # ============================
+    spotify_ids = [a["id"] for a in albums_data if a.get("id")]
+
+    existing_ids = set(
+        Album.objects.filter(spotify_id__in=spotify_ids)
+        .values_list("spotify_id", flat=True)
+    )
+
+    # ============================
+    # FETCH ARTISTS
+    # ============================
+    all_artists_data = []
+    seen_artist_ids = set()
+
+    for album in albums_data:
+        for artist in album.get("artists", []):
+            if artist["id"] not in seen_artist_ids:
+                all_artists_data.append(artist)
+                seen_artist_ids.add(artist["id"])
+
+    save_artists_bulk(all_artists_data)
+
+    artists_cache = {
+        a.spotify_id: a
+        for a in Artist.objects.filter(
+            spotify_id__in=[a["id"] for a in all_artists_data]
+        )
+    }
+
+    # ============================
+    # CREATE ALBUMS
+    # ============================
+    albums_to_create = []
+
+    for album in albums_data:
+        spotify_id = album.get("id")
+        if not spotify_id or spotify_id in existing_ids:
+            continue
+
+        albums_to_create.append(
+            Album(
+                spotify_id=spotify_id,
+                name=album.get("name"),
+                album_type=album.get(
+                    "album_type", Album.AlbumTypes.ALBUM
+                ),
+                release_date=parse_spotify_release_date(
+                    album.get("release_date")
+                ),
+                image_url=album["images"][0]["url"]
+                if album.get("images") else None,
+            )
+        )
+
+    if albums_to_create:
+        Album.objects.bulk_create(albums_to_create, ignore_conflicts=True)
+
+    # ============================
+    # M2M Album ↔ Artist
+    # ============================
+    albums_cache = {
+        a.spotify_id: a
+        for a in Album.objects.filter(spotify_id__in=spotify_ids)
+    }
+
+    album_artist_relations = []
+
+    for album_data in albums_data:
+        album = albums_cache.get(album_data["id"])
+        if not album:
+            continue
+
+        for artist_data in album_data.get("artists", []):
+            artist = artists_cache.get(artist_data["id"])
+            if artist:
+                album_artist_relations.append(
+                    Album.artists.through(
+                        album_id=album.id,
+                        artist_id=artist.id
+                    )
+                )
+
+    if album_artist_relations:
+        Album.artists.through.objects.bulk_create(
+            album_artist_relations,
+            ignore_conflicts=True
+        )
+
+
+        
 @shared_task
 def refresh_spotify_data(time_term):
-    spotify_users=SpotifyAccount.objects.all()
+    spotify_users = SpotifyAccount.objects.all()
     for spotify_user in spotify_users:
         refresh_spotify_user_data.delay(spotify_user.id, time_term)
 
@@ -345,13 +487,15 @@ def refresh_spotify_data(time_term):
 def refresh_spotify_user_data(spotify_account_id, time_term):
     try:
         spotify_account = SpotifyAccount.objects.get(id=spotify_account_id)
-        access_token = get_valid_token(spotify_account)
+        ensure_spotify_token(spotify_account.user)
+        access_token = spotify_account.access_token
 
         if not access_token:
             print(f"Failed to get token for SpotifyAccount {spotify_account_id}")
             return
 
         headers = {"Authorization": f"Bearer {access_token}"}
+
         fetch_top_items(headers, "artists", time_term, spotify_account.user.id)
         fetch_top_items(headers, "tracks", time_term, spotify_account.user.id)
 
@@ -361,10 +505,11 @@ def refresh_spotify_user_data(spotify_account_id, time_term):
     except SpotifyAccount.DoesNotExist:
         print(f"SpotifyAccount {spotify_account_id} does not exist")
 
+
 @shared_task
 def fetch_tracks_audio_features():
     track_ids = Track.objects.filter(audio_features__isnull=True).values_list('spotify_id', flat=True)
-    chunks = [track_ids[i:i+100] for i in range(0,len(track_ids),100)]
+    chunks = [track_ids[i:i + 100] for i in range(0, len(track_ids), 100)]
     for chunk in chunks:
         chunk_audio_features.delay(",".join(chunk))
 
@@ -377,8 +522,8 @@ def chunk_audio_features(data_chunk):
     if not spotify_user:
         print("No Spotify account available")
         return
-
-    access_token = get_valid_token(spotify_user)
+    spotify=ensure_spotify_token(spotify_user.user)
+    access_token = spotify.access_token
     if not access_token:
         print("Failed to get token")
         return
@@ -405,9 +550,8 @@ def chunk_audio_features(data_chunk):
         try:
             track_obj = Track.objects.get(spotify_id=track_spotify_id)
 
-
             audio_feature = AudioFeatures(
-                track=track_obj,  # ← Obiekt Track, nie string!
+                track=track_obj,
                 danceability=feature.get('danceability'),
                 energy=feature.get('energy'),
                 valence=feature.get('valence'),
@@ -540,4 +684,3 @@ def get_recent_video_categories(channel_id,access_token):
         for item in data.get("items", [])
         if "snippet" in item
     ]
-
