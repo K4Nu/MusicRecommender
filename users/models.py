@@ -322,6 +322,29 @@ class SpotifyPlaylist(models.Model):
     def __str__(self):
         return f"{self.name} ({self.user.username})"
 
+class SpotifyPlaylistTrack(models.Model):
+    playlist = models.ForeignKey(
+        SpotifyPlaylist,
+        on_delete=models.CASCADE,
+        related_name="playlist_tracks"
+    )
+    track = models.ForeignKey(
+        Track,
+        on_delete=models.CASCADE,
+        related_name="playlist_entries"
+    )
+
+    position = models.PositiveIntegerField()  # The rank counts
+    added_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ("playlist", "track")
+        ordering = ["position"]
+        indexes = [
+            models.Index(fields=["playlist"]),
+            models.Index(fields=["track"]),
+        ]
+
 class YoutubeAccount(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     youtube_id = models.CharField(max_length=255, unique=True)
