@@ -16,16 +16,14 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from users.views import SpotifyConnect,UserTopTracks,TestView,YoutubeConnect, SpotifyRefreshTokenView,RecommendationsView
+from users.views import SpotifyConnect,UserTopTracks,TestView,YoutubeConnect
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 from debug_toolbar.toolbar import debug_toolbar_urls
-from users.views import TestCelery
+
 urlpatterns = [
     path('admin/', admin.site.urls),
     path("auth/spotify/connect/",SpotifyConnect.as_view()),
     path("auth/youtube/connect/",YoutubeConnect.as_view()),
-    path("api/recommendations/", RecommendationsView.as_view(), name="recommendations"),
-    path("auth/spotify/token/refresh/",SpotifyRefreshTokenView.as_view()),
     path("auth/", include("djoser.urls")),
     path("auth/", include("djoser.urls.jwt")),
     path("auth/social/", include("allauth.socialaccount.urls")),
@@ -34,5 +32,4 @@ urlpatterns = [
     path('api/schema/swagger-ui/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
     path('api/schema/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
     path("test/", TestView.as_view()),
-    path("test-celery/", TestCelery.as_view()),
 ]+debug_toolbar_urls()

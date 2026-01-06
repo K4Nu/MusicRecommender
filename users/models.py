@@ -111,7 +111,7 @@ class Album(models.Model):
         default=AlbumTypes.ALBUM
     )
 
-    release_date = models.DateTimeField(null=True, blank=True)
+    release_date = release_date = models.DateField(null=True, blank=True)
 
     artists = models.ManyToManyField(
         Artist,
