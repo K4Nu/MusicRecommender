@@ -2,7 +2,8 @@ from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta, datetime
 import requests
-from .models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory, Album
+from .models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory, Album, \
+    SpotifyPlaylist
 import json
 from django.core.cache import cache
 from requests.exceptions import HTTPError
@@ -262,23 +263,91 @@ def fetch_saved_tracks(headers, user_id):
         print(f"Failed to fetch saved tracks: {e}")
 
 
-def fetch_playlists(headers, user_id):
-    """
-    Pobiera playlisty użytkownika.
-    """
-    url = "https://api.spotify.com/v1/me/playlists"
-    params = {'limit': 50}
+@shared_task
+def sync_user_playlists(user_id):
+    fetch_spotify_playlists.delay(user_id)
 
-    try:
-        response = requests.get(url, headers=headers, params=params)
+    playlists=SpotifyPlaylist.objects.filter(user_id=user_id)
+    for playlist in playlists:
+        fetch_playlist_tracks.delay(playlist.id)
+    return
+
+@shared_task
+def fetch_spotify_playlists(user_id):
+    user = User.objects.get(id=user_id)
+    spotify = ensure_spotify_token(user)
+    if not spotify:
+        return
+
+    headers = {"Authorization": f"Bearer {spotify.access_token}"}
+    url = "https://api.spotify.com/v1/me/playlists"
+    now = timezone.now()
+
+    existing = {
+        p.spotify_id: p
+        for p in SpotifyPlaylist.objects.filter(user=user)
+    }
+
+    to_create = []
+    to_update = []
+
+    while url:
+        response = requests.get(url, headers=headers, params={"limit": 50})
         response.raise_for_status()
         data = response.json()
 
-        playlists = data.get('items', [])
-        print(f"Fetched {len(playlists)} playlists for user {user_id}")
+        for item in data.get("items", []):
+            defaults = {
+                "user": user,
+                "name": item.get("name"),
+                "description": item.get("description"),
+                "image_url": item["images"][0]["url"] if item.get("images") else None,
+                "is_public": item.get("public") or False,
+                "is_collaborative": item.get("collaborative", False),
+                "tracks_count": item["tracks"]["total"],
+                "owner_spotify_id": item["owner"]["id"],
+                "owner_display_name": item["owner"].get("display_name"),
+                "external_url": item["external_urls"]["spotify"],
+                "snapshot_id": item.get("snapshot_id"),
+                "last_synced_at": now,
+            }
 
-    except requests.exceptions.RequestException as e:
-        print(f"Failed to fetch playlists: {e}")
+            playlist = existing.get(item["id"])
+
+            if playlist:
+                for field, value in defaults.items():
+                    setattr(playlist, field, value)
+                to_update.append(playlist)
+            else:
+                to_create.append(
+                    SpotifyPlaylist(
+                        spotify_id=item["id"],
+                        **defaults
+                    )
+                )
+
+        url = data.get("next")
+
+    if to_create:
+        SpotifyPlaylist.objects.bulk_create(to_create)
+
+    if to_update:
+        SpotifyPlaylist.objects.bulk_update(
+            to_update,
+            [
+                "name",
+                "description",
+                "image_url",
+                "is_public",
+                "is_collaborative",
+                "tracks_count",
+                "owner_spotify_id",
+                "owner_display_name",
+                "external_url",
+                "snapshot_id",
+                "last_synced_at",
+            ]
+        )
 
 
 def save_artists_bulk(artists_data):
