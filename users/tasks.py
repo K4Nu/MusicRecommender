@@ -89,7 +89,6 @@ def fetch_top_items(headers, item_type, time_range, user_id):
 
         user = User.objects.get(id=user_id)  # ✅ .get() zamiast .filter()
 
-        # Usuń stare rekordy
         UserTopItem.objects.filter(
             user=user,
             item_type=item_type[:-1],
@@ -97,7 +96,7 @@ def fetch_top_items(headers, item_type, time_range, user_id):
         ).delete()
 
         # ============================================
-        # ZBIERZ WSZYSTKIE IDs
+        # FETCH ALL IDs
         # ============================================
         if item_type == 'artists':
             all_artist_ids = [item['id'] for item in items]
@@ -128,71 +127,13 @@ def fetch_top_items(headers, item_type, time_range, user_id):
         # ============================================
         # BULK SAVE TRACKS
         # ============================================
+        tracks_cache = {}
         if item_type == 'tracks':
-            existing_tracks = {
-                t.spotify_id: t
-                for t in Track.objects.filter(spotify_id__in=all_track_ids)
-            }
-
-            tracks_to_create = []
-            tracks_to_update = []
-
             for item in items:
-                track_data = {
-                    'spotify_id': item['id'],
-                    'name': item.get('name'),
-                    'album_name': item.get('album', {}).get('name'),
-                    'duration_ms': item.get('duration_ms'),
-                    'popularity': item.get('popularity'),
-                    'preview_url': item.get('preview_url'),
-                    'image_url': item['album']['images'][0]['url'] if item.get('album', {}).get('images') else None,
-                }
+                track=save_track(item)
+                if track:
+                    tracks_cache[item["id"]] = track
 
-                if item['id'] in existing_tracks:
-                    track = existing_tracks[item['id']]
-                    for key, value in track_data.items():
-                        if key != 'spotify_id':
-                            setattr(track, key, value)
-                    tracks_to_update.append(track)
-                else:
-                    tracks_to_create.append(Track(**track_data))
-
-            if tracks_to_create:
-                Track.objects.bulk_create(tracks_to_create)
-            if tracks_to_update:
-                Track.objects.bulk_update(
-                    tracks_to_update,
-                    ['name', 'album_name', 'duration_ms', 'popularity', 'preview_url', 'image_url']
-                )
-
-            # Odśwież cache
-            tracks_cache = {
-                t.spotify_id: t
-                for t in Track.objects.filter(spotify_id__in=all_track_ids)
-            }
-
-            # M2M Relations
-            track_artist_relations = []
-            for item in items:
-                track = tracks_cache.get(item['id'])
-                if not track:
-                    continue
-
-                for artist_data in item.get('artists', []):
-                    artist = artists_cache.get(artist_data['id'])
-                    if artist:
-                        track_artist_relations.append(
-                            Track.artists.through(
-                                track_id=track.id,
-                                artist_id=artist.id
-                            )
-                        )
-
-            if track_artist_relations:
-                Track.artists.through.objects.bulk_create(
-                    track_artist_relations,
-                    ignore_conflicts=True
-                )
 
         # ============================================
         # BULK CREATE UserTopItems
@@ -235,7 +176,7 @@ def fetch_top_items(headers, item_type, time_range, user_id):
         print(f"Failed to fetch top {item_type} ({time_range}): {e}")
 
 
-def fetch_recently_played(headers, user_id):  # ✅ Zmienione na user_id
+def fetch_recently_played(headers, user_id):
     """
     Saves last 50 played songs by user
     """
@@ -248,7 +189,7 @@ def fetch_recently_played(headers, user_id):  # ✅ Zmienione na user_id
         data = response.json()
 
         items = data.get("items", [])
-        user = User.objects.get(id=user_id)  # ✅ Pobierz obiekt User
+        user = User.objects.get(id=user_id)
 
         last_event = (
             ListeningHistory.objects
@@ -274,18 +215,9 @@ def fetch_recently_played(headers, user_id):  # ✅ Zmienione na user_id
             if not track_id:
                 continue
 
-            try:
-                track = Track.objects.get(spotify_id=track_id)
-            except Track.DoesNotExist:
-                artists = save_artists(track_data.get("artists", []))  # ✅ Lista!
-
-                track = Track.objects.create(
-                    spotify_id=track_id,
-                    name=track_data.get("name"),
-                    duration_ms=track_data.get("duration_ms"),
-                    popularity=track_data.get("popularity"),
-                )
-                track.artists.add(*artists)
+            track=save_track(track_data)
+            if not track:
+                continue
 
             history_events.append(
                 ListeningHistory(
@@ -309,7 +241,6 @@ def fetch_saved_tracks(headers, user_id):
     Pobiera zapisane utwory (liked songs) z paginacją.
     """
     url = "https://api.spotify.com/v1/me/tracks"
-    all_tracks = []
 
     try:
         while url:  # ✅ Pętla dopóki jest URL
@@ -317,11 +248,15 @@ def fetch_saved_tracks(headers, user_id):
             response = requests.get(url, headers=headers, params=params)
             response.raise_for_status()
             data = response.json()
+            items = data.get('items', [])
 
-            all_tracks.extend(data.get('items', []))
-            url = data.get('next')  # ✅ None kończy pętlę
+            for item in items:
+                track_data=item.get("track")
+                if track_data:
+                    save_track(track_data)
+            url = data.get('next')  # ✅ None finish the loop
 
-        print(f"Fetched {len(all_tracks)} saved tracks for user {user_id}")
+        print(f"Fetched saved tracks for user {user_id}")
 
     except requests.exceptions.RequestException as e:
         print(f"Failed to fetch saved tracks: {e}")
@@ -417,7 +352,7 @@ def save_track(track_data):
 
         album_artists = save_artists(album_data.get("artists", []))
         if album_artists:
-            album.artists.add(*album_artists)
+            album.artists.set(album_artists)
 
     # =========================
     # TRACK
@@ -439,7 +374,8 @@ def save_track(track_data):
     # =========================
     track_artists = save_artists(track_data.get("artists", []))
     if track_artists:
-        track.artists.add(*track_artists)
+        track.artists.set(track_artists)
+
 
     return track
 
