@@ -284,6 +284,44 @@ class AudioFeatures(models.Model):
     class Meta:
         verbose_name_plural = "Audio Features"
 
+class SpotifyPlaylist(models.Model):
+    # The basic info
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='spotify_playlists')
+    spotify_id = models.CharField(max_length=100, unique=True, db_index=True)
+    name = models.CharField(max_length=255)
+
+    # Additional usefull things
+    description = models.TextField(blank=True, null=True)
+    image_url = models.URLField(max_length=500, blank=True, null=True)
+
+    # Info about it
+    is_public = models.BooleanField(default=True)
+    is_collaborative = models.BooleanField(default=False)
+    tracks_count = models.IntegerField(default=0)
+
+    # Owner can differ
+    owner_spotify_id = models.CharField(max_length=100)
+    owner_display_name = models.CharField(max_length=255, blank=True)
+
+    # playlist URL
+    external_url = models.URLField(max_length=500, blank=True)
+
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+
+    # Snapshot ID
+    snapshot_id = models.CharField(max_length=100, blank=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+        verbose_name = 'Spotify Playlist'
+        verbose_name_plural = 'Spotify Playlists'
+
+    def __str__(self):
+        return f"{self.name} ({self.user.username})"
+
 class YoutubeAccount(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     youtube_id = models.CharField(max_length=255, unique=True)
