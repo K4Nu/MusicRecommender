@@ -3,7 +3,7 @@ from django.utils import timezone
 from datetime import timedelta, datetime
 import requests
 from .models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory, Album, \
-    SpotifyPlaylist, SpotifyPlaylistTrack
+    SpotifyPlaylist, SpotifyPlaylistTrack, Genre
 import json
 from django.core.cache import cache
 from requests.exceptions import HTTPError
@@ -405,7 +405,6 @@ def fetch_playlist_tracks(self, playlist_id):
 
         url = data.get("next")
 
-    # ✅ JEDEN INSERT
     if relations:
         SpotifyPlaylistTrack.objects.bulk_create(relations)
 
@@ -418,27 +417,136 @@ def fetch_playlist_tracks(self, playlist_id):
 
 def save_artists_bulk(artists_data):
     """
-    Bulk save artists - tylko dla LISTY
+    Bulk save/update artists z genres
+    - Tworzy nowych artystów
+    - Aktualizuje istniejących (popularity, image_url)
+    - Dodaje brakujące gatunki (ale nie usuwa starych)
     """
     if not artists_data:
         return
 
     spotify_ids = [a['id'] for a in artists_data]
 
-    existing_ids = set(
-        Artist.objects.filter(spotify_id__in=spotify_ids)
-        .values_list("spotify_id", flat=True)
-    )
+    # ============================================
+    # 1. SPRAWDŹ KTÓRZY ARTYŚCI ISTNIEJĄ
+    # ============================================
+    existing_artists = {
+        a.spotify_id: a
+        for a in Artist.objects.filter(spotify_id__in=spotify_ids)
+    }
+    existing_ids = set(existing_artists.keys())
 
-    to_create = [
-        Artist(spotify_id=a['id'], name=a['name'])
-        for a in artists_data
-        if a['id'] not in existing_ids
-    ]
+    # ============================================
+    # 2. BULK CREATE/UPDATE GENRES
+    # ============================================
+    all_genres = set()
+    for artist in artists_data:
+        all_genres.update(artist.get("genres", []))
+
+    if all_genres:
+        existing_genre_names = set(
+            Genre.objects.filter(name__in=all_genres).values_list("name", flat=True)
+        )
+
+        new_genres = [
+            Genre(name=genre)
+            for genre in all_genres
+            if genre not in existing_genre_names
+        ]
+
+        if new_genres:
+            Genre.objects.bulk_create(new_genres, ignore_conflicts=True)
+
+    # Cache wszystkich gatunków
+    genres_cache = {
+        g.name: g
+        for g in Genre.objects.filter(name__in=all_genres)
+    }
+
+    # ============================================
+    # 3. BULK CREATE NOWYCH ARTYSTÓW
+    # ============================================
+    to_create = []
+    for item in artists_data:
+        if item["id"] not in existing_ids:
+            to_create.append(
+                Artist(
+                    spotify_id=item["id"],
+                    name=item["name"],
+                    popularity=item.get("popularity"),
+                    image_url=item["images"][0]["url"] if item.get("images") else None,
+                )
+            )
 
     if to_create:
         Artist.objects.bulk_create(to_create, ignore_conflicts=True)
 
+    # ============================================
+    # 4. BULK UPDATE ISTNIEJĄCYCH ARTYSTÓW
+    # ============================================
+    to_update = []
+    for item in artists_data:
+        if item["id"] in existing_ids:
+            artist = existing_artists[item["id"]]
+
+            # Zaktualizuj pola
+            artist.name = item["name"]
+            artist.popularity = item.get("popularity")
+            artist.image_url = item["images"][0]["url"] if item.get("images") else None
+
+            to_update.append(artist)
+
+    if to_update:
+        Artist.objects.bulk_update(
+            to_update,
+            ['name', 'popularity', 'image_url'],
+            batch_size=100
+        )
+
+    # ============================================
+    # 5. ODŚWIEŻ CACHE ARTYSTÓW (po create/update)
+    # ============================================
+    artists_cache = {
+        a.spotify_id: a
+        for a in Artist.objects.filter(spotify_id__in=spotify_ids)
+    }
+
+    # ============================================
+    # 6. POBIERZ ISTNIEJĄCE RELACJE ARTIST↔GENRE
+    # ============================================
+    existing_relations = set(
+        Artist.genres.through.objects
+        .filter(artist__spotify_id__in=spotify_ids)
+        .values_list('artist_id', 'genre_id')
+    )
+
+    # ============================================
+    # 7. BULK CREATE NOWYCH RELACJI M2M
+    # ============================================
+    artist_genre_relations = []
+
+    for item in artists_data:
+        artist = artists_cache.get(item["id"])
+        if not artist:
+            continue
+
+        for genre_name in item.get("genres", []):
+            genre = genres_cache.get(genre_name)
+            if genre:
+                # ✅ Dodaj tylko jeśli relacja nie istnieje
+                if (artist.id, genre.id) not in existing_relations:
+                    artist_genre_relations.append(
+                        Artist.genres.through(
+                            artist_id=artist.id,
+                            genre_id=genre.id
+                        )
+                    )
+
+    if artist_genre_relations:
+        Artist.genres.through.objects.bulk_create(
+            artist_genre_relations,
+            ignore_conflicts=True
+        )
 
 def save_artists(artists_data):
     """
