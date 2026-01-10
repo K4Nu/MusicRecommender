@@ -11,6 +11,9 @@ import os
 from .services import ensure_spotify_token
 from .youtube_classifiers import compute_music_score
 from datetime import date
+import logging
+
+logger = logging.getLogger(__name__)
 
 def parse_spotify_release_date(value: str):
     if not value:
@@ -29,7 +32,7 @@ def parse_spotify_release_date(value: str):
 @shared_task
 def fetch_spotify_initial_data(user_id):
     """
-    Pobiera wszystkie początkowe dane ze Spotify po pierwszym połączeniu konta.
+    Fetch initial data from Spotify
     """
     try:
         spotify_account = SpotifyAccount.objects.get(user_id=user_id)
@@ -64,7 +67,7 @@ def fetch_spotify_initial_data(user_id):
     fetch_saved_tracks(headers, user_id)
 
     # 5. Playlists
-    fetch_playlists(headers, user_id)
+    sync_user_playlists.delay(user_id)
 
     # Zaktualizuj last_synced_at
     spotify_account.last_synced_at = timezone.now()
@@ -130,10 +133,7 @@ def fetch_top_items(headers, item_type, time_range, user_id):
         # ============================================
         tracks_cache = {}
         if item_type == 'tracks':
-            for item in items:
-                track=save_track(item)
-                if track:
-                    tracks_cache[item["id"]] = track
+            tracks_cache=save_tracks_bulk(items)
 
 
         # ============================================
@@ -200,7 +200,7 @@ def fetch_recently_played(headers, user_id):
         )
 
         last_played_at = last_event.played_at if last_event else None
-        history_events = []
+        new_items = []
 
         for item in items:
             played_at = datetime.fromisoformat(item.get("played_at").replace("Z", "+00:00"))
@@ -216,22 +216,32 @@ def fetch_recently_played(headers, user_id):
             if not track_id:
                 continue
 
-            track=save_track(track_data)
-            if not track:
-                continue
 
-            history_events.append(
-                ListeningHistory(
-                    user=user,
-                    track=track,
-                    played_at=played_at,
+            new_items.append(item)
+
+        if not new_items:
+            print("No new items found")
+            return
+
+        tracks_data=[item.get('track') for item in new_items]
+        tracks_cache=save_tracks_bulk(tracks_data)
+
+        history_events=[]
+        for item in new_items:
+            played_at = datetime.fromisoformat(item.get("played_at").replace("Z", "+00:00"))
+            track=tracks_cache.get(item.get('track',{}).get("id"))
+
+            if track:
+                history_events.append(
+                    ListeningHistory(
+                        user=user,
+                        track=track,
+                        played_at=played_at,
+                    )
                 )
-            )
 
         if history_events:
             ListeningHistory.objects.bulk_create(history_events)
-
-        print(f"Saved {len(history_events)} new listening events for user {user_id}")
 
     except requests.exceptions.RequestException as e:
         print(f"Failed to fetch recently played: {e}")
@@ -251,11 +261,10 @@ def fetch_saved_tracks(headers, user_id):
             data = response.json()
             items = data.get('items', [])
 
-            for item in items:
-                track_data=item.get("track")
-                if track_data:
-                    save_track(track_data)
-            url = data.get('next')  # ✅ None finish the loop
+            tracks_data = [item.get("track") for item in items if item.get("track")]
+            save_tracks_bulk(tracks_data)
+
+            url = data.get('next')  # None finish the loop
 
         print(f"Fetched saved tracks for user {user_id}")
 
@@ -384,24 +393,27 @@ def fetch_playlist_tracks(self, playlist_id):
         except requests.exceptions.RequestException as e:
             raise self.retry(exc=e, countdown=30)
 
+        tracks_data=[]
         for item in data.get("items", []):
             track_data = item.get("track")
-            if not track_data or not track_data.get("id"):
-                continue
+            if track_data and track_data.get("id"):
+                tracks_data.append(track_data)
 
-            track = save_track(track_data)
-            if not track:
-                continue
 
-            relations.append(
-                SpotifyPlaylistTrack(
-                    playlist=playlist,
-                    track=track,
-                    position=position,
-                    added_at=item.get("added_at"),
+        tracks_cache=save_tracks_bulk(tracks_data)
+        for item in data.get("items", []):
+            track=tracks_cache.get(item.get("track",{}).get("id"))
+            if track:
+
+                relations.append(
+                    SpotifyPlaylistTrack(
+                        playlist=playlist,
+                        track=track,
+                        position=position,
+                        added_at=item.get("added_at"),
+                    )
                 )
-            )
-            position += 1
+                position += 1
 
         url = data.get("next")
 
@@ -488,8 +500,10 @@ def save_artists_bulk(artists_data):
     for item in artists_data:
         if item["id"] in existing_ids:
             artist = existing_artists[item["id"]]
+            is_full_artist = bool(item.get("genres") or item.get("images"))
+            if not is_full_artist:
+                continue
 
-            # Zaktualizuj pola
             artist.name = item["name"]
             artist.popularity = item.get("popularity")
             artist.image_url = item["images"][0]["url"] if item.get("images") else None
@@ -623,6 +637,259 @@ def save_track(track_data):
     return track
 
 
+def save_tracks_bulk(tracks_data):
+    """
+    Bulk save/update tracks z albums i artists
+
+    Optymalizacje:
+    - Bulk create/update dla albums
+    - Bulk create/update dla tracks
+    - Bulk M2M relations (Album ↔ Artist, Track ↔ Artist)
+    - Minimalna liczba zapytań SQL
+
+    Args:
+        tracks_data: list[dict] - lista tracków ze Spotify API
+
+    Returns:
+        dict[str, Track] - {spotify_id: Track object}
+    """
+    if not tracks_data:
+        return {}
+
+    # ============================================
+    # 1. ZBIERZ WSZYSTKIE IDs
+    # ============================================
+    track_ids = [t['id'] for t in tracks_data if t.get('id')]
+    album_ids = [t['album']['id'] for t in tracks_data if t.get('album', {}).get('id')]
+
+    # Zbierz wszystkich artystów (z tracks i albums)
+    all_artists_data = []
+    seen_artist_ids = set()
+
+    for track_data in tracks_data:
+        # Track artists
+        for artist_data in track_data.get('artists', []):
+            if artist_data['id'] not in seen_artist_ids:
+                all_artists_data.append(artist_data)
+                seen_artist_ids.add(artist_data['id'])
+
+        # Album artists
+        album_data = track_data.get('album', {})
+        for artist_data in album_data.get('artists', []):
+            if artist_data['id'] not in seen_artist_ids:
+                all_artists_data.append(artist_data)
+                seen_artist_ids.add(artist_data['id'])
+
+    # ============================================
+    # 2. BULK SAVE ARTISTS
+    # ============================================
+    save_artists_bulk(all_artists_data)
+
+    artists_cache = {
+        a.spotify_id: a
+        for a in Artist.objects.filter(spotify_id__in=list(seen_artist_ids))
+    }
+
+    # ============================================
+    # 3. BULK SAVE ALBUMS
+    # ============================================
+    existing_albums = {
+        a.spotify_id: a
+        for a in Album.objects.filter(spotify_id__in=album_ids)
+    }
+    existing_album_ids = set(existing_albums.keys())
+
+    # Create new albums
+    albums_to_create = []
+    for track_data in tracks_data:
+        album_data = track_data.get('album')
+        if not album_data or not album_data.get('id'):
+            continue
+
+        if album_data['id'] not in existing_album_ids:
+            albums_to_create.append(
+                Album(
+                    spotify_id=album_data['id'],
+                    name=album_data.get('name'),
+                    album_type=album_data.get('album_type', Album.AlbumTypes.ALBUM),
+                    release_date=parse_spotify_release_date(album_data.get('release_date')),
+                    image_url=album_data['images'][0]['url'] if album_data.get('images') else None,
+                )
+            )
+
+    if albums_to_create:
+        Album.objects.bulk_create(albums_to_create, ignore_conflicts=True)
+
+    # Update existing albums
+    albums_to_update = []
+    for track_data in tracks_data:
+        album_data = track_data.get('album')
+        if not album_data or not album_data.get('id'):
+            continue
+
+        if album_data['id'] in existing_album_ids:
+            album = existing_albums[album_data['id']]
+            album.name = album_data.get('name')
+            album.album_type = album_data.get('album_type', Album.AlbumTypes.ALBUM)
+            album.release_date = parse_spotify_release_date(album_data.get('release_date'))
+            album.image_url = album_data['images'][0]['url'] if album_data.get('images') else None
+            albums_to_update.append(album)
+
+    if albums_to_update:
+        Album.objects.bulk_update(
+            albums_to_update,
+            ['name', 'album_type', 'release_date', 'image_url'],
+            batch_size=100
+        )
+
+    # Refresh albums cache
+    albums_cache = {
+        a.spotify_id: a
+        for a in Album.objects.filter(spotify_id__in=album_ids)
+    }
+
+    # ============================================
+    # 4. BULK M2M: ALBUM ↔ ARTIST
+    # ============================================
+    # Pobierz istniejące relacje
+    album_db_ids = [a.id for a in albums_cache.values()]
+    existing_album_artist_relations = set(
+        Album.artists.through.objects
+        .filter(album_id__in=album_db_ids)
+        .values_list('album_id', 'artist_id')
+    )
+
+    album_artist_relations = []
+    for track_data in tracks_data:
+        album_data = track_data.get('album')
+        if not album_data or not album_data.get('id'):
+            continue
+
+        album = albums_cache.get(album_data['id'])
+        if not album:
+            continue
+
+        for artist_data in album_data.get('artists', []):
+            artist = artists_cache.get(artist_data['id'])
+            if artist and (album.id, artist.id) not in existing_album_artist_relations:
+                album_artist_relations.append(
+                    Album.artists.through(
+                        album_id=album.id,
+                        artist_id=artist.id
+                    )
+                )
+
+    if album_artist_relations:
+        Album.artists.through.objects.bulk_create(
+            album_artist_relations,
+            ignore_conflicts=True
+        )
+
+    # ============================================
+    # 5. BULK SAVE TRACKS
+    # ============================================
+    existing_tracks = {
+        t.spotify_id: t
+        for t in Track.objects.filter(spotify_id__in=track_ids)
+    }
+    existing_track_ids = set(existing_tracks.keys())
+
+    # Create new tracks
+    tracks_to_create = []
+    for track_data in tracks_data:
+        if not track_data.get('id'):
+            continue
+
+        if track_data['id'] not in existing_track_ids:
+            album_id = track_data.get('album', {}).get('id')
+            album = albums_cache.get(album_id) if album_id else None
+
+            tracks_to_create.append(
+                Track(
+                    spotify_id=track_data['id'],
+                    name=track_data.get('name'),
+                    duration_ms=track_data.get('duration_ms'),
+                    popularity=track_data.get('popularity'),
+                    preview_url=track_data.get('preview_url'),
+                    image_url=album.image_url if album else None,
+                    album=album,
+                )
+            )
+
+    if tracks_to_create:
+        Track.objects.bulk_create(tracks_to_create, ignore_conflicts=True)
+
+    # Update existing tracks
+    tracks_to_update = []
+    for track_data in tracks_data:
+        if not track_data.get('id'):
+            continue
+
+        if track_data['id'] in existing_track_ids:
+            track = existing_tracks[track_data['id']]
+            album_id = track_data.get('album', {}).get('id')
+            album = albums_cache.get(album_id) if album_id else None
+
+            track.name = track_data.get('name')
+            track.duration_ms = track_data.get('duration_ms')
+            track.popularity = track_data.get('popularity')
+            track.preview_url = track_data.get('preview_url')
+            track.image_url = album.image_url if album else None
+            track.album = album
+
+            tracks_to_update.append(track)
+
+    if tracks_to_update:
+        Track.objects.bulk_update(
+            tracks_to_update,
+            ['name', 'duration_ms', 'popularity', 'preview_url', 'image_url', 'album'],
+            batch_size=100
+        )
+
+    # Refresh tracks cache
+    tracks_cache = {
+        t.spotify_id: t
+        for t in Track.objects.filter(spotify_id__in=track_ids)
+    }
+
+    # ============================================
+    # 6. BULK M2M: TRACK ↔ ARTIST
+    # ============================================
+    # Pobierz istniejące relacje
+    track_db_ids = [t.id for t in tracks_cache.values()]
+    existing_track_artist_relations = set(
+        Track.artists.through.objects
+        .filter(track_id__in=track_db_ids)
+        .values_list('track_id', 'artist_id')
+    )
+
+    track_artist_relations = []
+    for track_data in tracks_data:
+        if not track_data.get('id'):
+            continue
+
+        track = tracks_cache.get(track_data['id'])
+        if not track:
+            continue
+
+        for artist_data in track_data.get('artists', []):
+            artist = artists_cache.get(artist_data['id'])
+            if artist and (track.id, artist.id) not in existing_track_artist_relations:
+                track_artist_relations.append(
+                    Track.artists.through(
+                        track_id=track.id,
+                        artist_id=artist.id
+                    )
+                )
+
+    if track_artist_relations:
+        Track.artists.through.objects.bulk_create(
+            track_artist_relations,
+            ignore_conflicts=True
+        )
+
+    return tracks_cache
+
 def save_albums_bulk(albums_data):
     if not albums_data:
         return
@@ -687,12 +954,48 @@ def save_albums_bulk(albums_data):
         Album.objects.bulk_create(albums_to_create, ignore_conflicts=True)
 
     # ============================
+    # UPDATE EXISTING ALBUMS
+    # ============================
+    existing_albums_objs = {
+        a.spotify_id: a
+        for a in Album.objects.filter(spotify_id__in=existing_ids)
+    }
+
+    albums_to_update = []
+    for album in albums_data:
+        spotify_id = album.get("id")
+        if not spotify_id:
+            continue
+
+        if spotify_id in existing_ids:
+            album_obj = existing_albums_objs[spotify_id]
+            album_obj.name = album.get("name")
+            album_obj.album_type = album.get("album_type", Album.AlbumTypes.ALBUM)
+            album_obj.release_date = parse_spotify_release_date(album.get("release_date"))
+            album_obj.image_url = album["images"][0]["url"] if album.get("images") else None
+            albums_to_update.append(album_obj)
+
+    if albums_to_update:
+        Album.objects.bulk_update(
+            albums_to_update,
+            ['name', 'album_type', 'release_date', 'image_url'],
+            batch_size=100
+        )
+
+    # ============================
     # M2M Album ↔ Artist
     # ============================
     albums_cache = {
         a.spotify_id: a
         for a in Album.objects.filter(spotify_id__in=spotify_ids)
     }
+
+    album_db_ids = [a.id for a in albums_cache.values()]
+    existing_album_artist_relations = set(
+        Album.artists.through.objects
+        .filter(album_id__in=album_db_ids)
+        .values_list('album_id', 'artist_id')
+    )
 
     album_artist_relations = []
 
@@ -703,7 +1006,7 @@ def save_albums_bulk(albums_data):
 
         for artist_data in album_data.get("artists", []):
             artist = artists_cache.get(artist_data["id"])
-            if artist:
+            if artist and (album.id, artist.id) not in existing_album_artist_relations:
                 album_artist_relations.append(
                     Album.artists.through(
                         album_id=album.id,
@@ -717,8 +1020,6 @@ def save_albums_bulk(albums_data):
             ignore_conflicts=True
         )
 
-
-        
 @shared_task
 def refresh_spotify_data(time_term):
     spotify_users = SpotifyAccount.objects.all()
