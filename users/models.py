@@ -66,6 +66,8 @@ class SpotifyAccount(models.Model):
     refresh_token = models.CharField(max_length=255)
     expires_at = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
+    playlists_etag = models.CharField(max_length=128, null=True, blank=True)
+
 
     def __str__(self):
         return self.user.email
@@ -293,7 +295,6 @@ class SpotifyPlaylist(models.Model):
     # Additional usefull things
     description = models.TextField(blank=True, null=True)
     image_url = models.URLField(max_length=500, blank=True, null=True)
-    etag = models.CharField(max_length=128, null=True, blank=True)
     tracks_etag = models.CharField(max_length=128, null=True, blank=True)
 
     # Info about it

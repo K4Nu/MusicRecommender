@@ -373,6 +373,8 @@ def fetch_playlist_tracks(self, playlist_id):
         return
 
     headers = {"Authorization": f"Bearer {spotify.access_token}"}
+    if playlist.tracks_etag:
+        headers["If-None-Match"] = playlist.tracks_etag
     url = f"https://api.spotify.com/v1/playlists/{playlist.spotify_id}/tracks"
 
     SpotifyPlaylistTrack.objects.filter(playlist=playlist).delete()
