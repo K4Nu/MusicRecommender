@@ -8,7 +8,7 @@ from djoser.serializers import UserSerializer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions, status
-from .tasks import fetch_spotify_initial_data,youtube_test_fetch,check_youtube_channel_category
+from tasks.spotify_tasks import fetch_spotify_initial_data,youtube_test_fetch,check_youtube_channel_category
 from users.models import SpotifyAccount,UserTopItem,YoutubeAccount
 from rest_framework import generics
 from .serializers import UserTopTrackSerializer
@@ -339,7 +339,7 @@ class TestCelery(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        from .tasks import fetch_recently_played
+        from .spotify_tasks import fetch_recently_played
         spotify_account=SpotifyAccount.objects.get(user=self.request.user)
         if not spotify_account:
             return Response(
