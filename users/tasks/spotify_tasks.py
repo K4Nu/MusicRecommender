@@ -2,16 +2,15 @@ from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta, datetime
 import requests
-from .models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory, Album, \
+from users.models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory, Album, \
     SpotifyPlaylist, SpotifyPlaylistTrack, Genre
 from utils.locks import acquire_playlist_lock, release_playlist_lock
 from django.core.cache import cache
 from requests.exceptions import HTTPError
-import os
-from .services import ensure_spotify_token
-from .youtube_classifiers import compute_music_score
+from users.youtube_classifiers import compute_music_score
 from datetime import date
 import logging
+from users.services import ensure_spotify_token
 
 logger = logging.getLogger(__name__)
 
@@ -271,15 +270,12 @@ def fetch_saved_tracks(headers, user_id):
     except requests.exceptions.RequestException as e:
         print(f"Failed to fetch saved tracks: {e}")
 
-
 @shared_task
 def sync_user_playlists(user_id):
-    fetch_spotify_playlists(user_id)
+    changed_playlists = fetch_spotify_playlists(user_id)
 
-    playlists=SpotifyPlaylist.objects.filter(user_id=user_id)
-    for playlist in playlists:
-        fetch_playlist_tracks.delay(playlist.id)
-    return
+    for playlist_id in changed_playlists:
+        fetch_playlist_tracks.delay(playlist_id)
 
 def fetch_spotify_playlists(user_id):
 
