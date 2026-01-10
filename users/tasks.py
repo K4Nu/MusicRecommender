@@ -282,12 +282,15 @@ def sync_user_playlists(user_id):
     return
 
 def fetch_spotify_playlists(user_id):
+
     user = User.objects.get(id=user_id)
     spotify = ensure_spotify_token(user)
     if not spotify:
         return
 
     headers = {"Authorization": f"Bearer {spotify.access_token}"}
+    if spotify.playlists_etag:
+        headers["If-None-Match"]=spotify.playlists_etag
     url = "https://api.spotify.com/v1/me/playlists"
     now = timezone.now()
 
@@ -298,10 +301,22 @@ def fetch_spotify_playlists(user_id):
 
     to_create = []
     to_update = []
+    changed_playlists = []
+    first_page=True
 
     while url:
         response = requests.get(url, headers=headers, params={"limit": 50})
+        if response.status_code == 304:
+            spotify.last_synced_at = timezone.now()
+            spotify.save(update_fields=["last_synced_at"])
+            return []
         response.raise_for_status()
+        if first_page:
+            spotify.playlists_etag = response.headers.get("ETag")
+            spotify.save(update_fields=["playlists_etag"])
+            headers.pop("If-None-Match", None)
+            first_page=False
+
         data = response.json()
 
         for item in data.get("items", []):
@@ -323,6 +338,8 @@ def fetch_spotify_playlists(user_id):
             playlist = existing.get(item["id"])
 
             if playlist:
+                if playlist.snapshot_id!=item.get("snapshot_id"):
+                    changed_playlists.append(playlist.id)
                 for field, value in defaults.items():
                     setattr(playlist, field, value)
                 to_update.append(playlist)
@@ -333,11 +350,16 @@ def fetch_spotify_playlists(user_id):
                         **defaults
                     )
                 )
-
         url = data.get("next")
 
     if to_create:
         SpotifyPlaylist.objects.bulk_create(to_create)
+
+        changed_playlists.extend(
+            SpotifyPlaylist.objects.filter(
+                spotify_id__in=[p.spotify_id for p in to_create]
+            ).values_list("id", flat=True)
+        )
 
     if to_update:
         SpotifyPlaylist.objects.bulk_update(
@@ -356,6 +378,7 @@ def fetch_spotify_playlists(user_id):
                 "last_synced_at",
             ]
         )
+    return changed_playlists
 
 @shared_task(bind=True, max_retries=3)
 def fetch_playlist_tracks(self, playlist_id):
@@ -364,7 +387,6 @@ def fetch_playlist_tracks(self, playlist_id):
     except SpotifyPlaylist.DoesNotExist:
         return
 
-    # 🔑 snapshot check
     if playlist.tracks_snapshot_id == playlist.snapshot_id:
         return
 
@@ -373,13 +395,14 @@ def fetch_playlist_tracks(self, playlist_id):
         return
 
     headers = {"Authorization": f"Bearer {spotify.access_token}"}
+    if playlist.tracks_etag:
+        headers["If-None-Match"] = playlist.tracks_etag
     url = f"https://api.spotify.com/v1/playlists/{playlist.spotify_id}/tracks"
 
-    SpotifyPlaylistTrack.objects.filter(playlist=playlist).delete()
 
     relations = []
     position = 0
-
+    first_page=True
     while url:
         try:
             r = requests.get(
@@ -388,10 +411,28 @@ def fetch_playlist_tracks(self, playlist_id):
                 params={"limit": 100},
                 timeout=15
             )
-            r.raise_for_status()
-            data = r.json()
+
         except requests.exceptions.RequestException as e:
             raise self.retry(exc=e, countdown=30)
+
+        if r.status_code == 304:
+            playlist.tracks_snapshot_id = playlist.snapshot_id
+            playlist.last_synced_at = timezone.now()
+            playlist.save(
+                update_fields=["last_synced_at", "tracks_snapshot_id"]
+            )
+            return
+
+        r.raise_for_status()
+        data=r.json()
+
+        if first_page:
+            playlist.tracks_etag=r.headers.get("ETag")
+            playlist.save(update_fields=["tracks_etag"])
+
+            SpotifyPlaylistTrack.objects.filter(playlist=playlist).delete()
+            headers.pop("If-None-Match", None)
+            first_page = False
 
         tracks_data=[]
         for item in data.get("items", []):
