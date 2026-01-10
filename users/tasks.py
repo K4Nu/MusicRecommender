@@ -376,7 +376,6 @@ def fetch_playlist_tracks(self, playlist_id):
     except SpotifyPlaylist.DoesNotExist:
         return
 
-    # 🔑 snapshot check
     if playlist.tracks_snapshot_id == playlist.snapshot_id:
         return
 
@@ -389,11 +388,10 @@ def fetch_playlist_tracks(self, playlist_id):
         headers["If-None-Match"] = playlist.tracks_etag
     url = f"https://api.spotify.com/v1/playlists/{playlist.spotify_id}/tracks"
 
-    SpotifyPlaylistTrack.objects.filter(playlist=playlist).delete()
 
     relations = []
     position = 0
-
+    first_page=True
     while url:
         try:
             r = requests.get(
@@ -402,10 +400,28 @@ def fetch_playlist_tracks(self, playlist_id):
                 params={"limit": 100},
                 timeout=15
             )
-            r.raise_for_status()
-            data = r.json()
+
         except requests.exceptions.RequestException as e:
             raise self.retry(exc=e, countdown=30)
+
+        if r.status_code == 304:
+            playlist.tracks_snapshot_id = playlist.snapshot_id
+            playlist.last_synced_at = timezone.now()
+            playlist.save(
+                update_fields=["last_synced_at", "tracks_snapshot_id"]
+            )
+            return
+
+        r.raise_for_status()
+        data=r.json()
+
+        if first_page:
+            playlist.tracks_etag=r.headers.get("ETag")
+            playlist.save(update_fields=["tracks_etag"])
+
+            SpotifyPlaylistTrack.objects.filter(playlist=playlist).delete()
+            headers.pop("If-None-Match", None)
+            first_page = False
 
         tracks_data=[]
         for item in data.get("items", []):
