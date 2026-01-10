@@ -288,6 +288,8 @@ def fetch_spotify_playlists(user_id):
         return
 
     headers = {"Authorization": f"Bearer {spotify.access_token}"}
+    if spotify.playlists_etag:
+        headers["If-None-Match"]=spotify.playlists_etag
     url = "https://api.spotify.com/v1/me/playlists"
     now = timezone.now()
 
@@ -298,10 +300,21 @@ def fetch_spotify_playlists(user_id):
 
     to_create = []
     to_update = []
+    first_page=True
 
     while url:
         response = requests.get(url, headers=headers, params={"limit": 50})
+        if response.status_code == 304:
+            spotify.last_synced_at = timezone.now()
+            spotify.save(update_fields=["last_synced_at"])
+            return
         response.raise_for_status()
+        if first_page:
+            spotify.playlists_etag = response.headers.get("ETag")
+            spotify.save(update_fields=["playlists_etag"])
+            headers.pop("If-None-Match", None)
+            first_page=False
+
         data = response.json()
 
         for item in data.get("items", []):
@@ -333,7 +346,6 @@ def fetch_spotify_playlists(user_id):
                         **defaults
                     )
                 )
-
         url = data.get("next")
 
     if to_create:
