@@ -353,10 +353,17 @@ class SpotifyPlaylistTrack(models.Model):
 
 class YoutubeAccount(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
+
     youtube_id = models.CharField(max_length=255, unique=True)
+
     access_token = models.CharField(max_length=512)
     refresh_token = models.CharField(max_length=512)
     expires_at = models.DateTimeField()
+
+    # 🔹 sync helpers
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    subscriptions_etag = models.CharField(max_length=255, null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
