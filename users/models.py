@@ -293,6 +293,8 @@ class SpotifyPlaylist(models.Model):
     # Additional usefull things
     description = models.TextField(blank=True, null=True)
     image_url = models.URLField(max_length=500, blank=True, null=True)
+    etag = models.CharField(max_length=128, null=True, blank=True)
+    tracks_etag = models.CharField(max_length=128, null=True, blank=True)
 
     # Info about it
     is_public = models.BooleanField(default=True)
