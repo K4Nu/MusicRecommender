@@ -43,6 +43,18 @@ class EncryptedTextField(models.TextField):
         return value
 
 
+class YoutubeAccountManager(models.Manager):
+    """Manager do wygodnych zapytań o konta YouTube"""
+
+    def expired(self):
+        """Zwraca konta z wygasłymi tokenami"""
+        return self.filter(expires_at__lt=timezone.now())
+
+    def needs_refresh(self):
+        """Zwraca konta wymagające odświeżenia tokenu (wygasające w ciągu 5 min)"""
+        threshold = timezone.now() + timedelta(minutes=5)
+        return self.filter(expires_at__lt=threshold)
+
 class MyUserManager(BaseUserManager):
     """
     A custom user manager to deal with emails as unique identifiers for auth
