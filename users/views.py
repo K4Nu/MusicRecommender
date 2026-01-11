@@ -8,7 +8,7 @@ from djoser.serializers import UserSerializer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions, status
-from .tasks import fetch_spotify_initial_data,youtube_test_fetch,check_youtube_channel_category
+from .tasks.spotify_tasks import fetch_spotify_initial_data,youtube_test_fetch,check_youtube_channel_category,fetch_recently_played
 from users.models import SpotifyAccount,UserTopItem,YoutubeAccount
 from rest_framework import generics
 from .serializers import UserTopTrackSerializer
@@ -334,3 +334,22 @@ class RecommendationsView(APIView):
              },status=200
         )
 
+class TestCelery(APIView):
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        spotify_account=SpotifyAccount.objects.get(user=self.request.user)
+        if not spotify_account:
+            return Response(
+                {"detail": "No spotify account found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        access_token=spotify_account.access_token
+        headers = {"Authorization": f"Bearer {access_token}"}
+        fetch_recently_played(headers,request.user.id)
+
+        return Response(
+            {"detail":"Tokens valid, Recommendations placeholder",
+             },status=200
+        )
