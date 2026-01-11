@@ -466,7 +466,6 @@ class UserYoutubeChannelManager(models.Manager):
         return self.filter(
             user=user,
             channel__is_music=True,
-            channel__is_active=True
         ).select_related('channel')
 
 
