@@ -454,6 +454,21 @@ class YoutubeChannel(models.Model):
     def __str__(self):
         return self.title
 
+class UserYouTubeChannelManager(models.Manager):
+    """Manager do wygodnych zapytań o subskrypcje"""
+
+    def for_user(self, user):
+        """Zwraca subskrypcje użytkownika"""
+        return self.filter(user=user).select_related('channel')
+
+    def music_subscriptions(self, user):
+        """Zwraca subskrypcje kanałów muzycznych"""
+        return self.filter(
+            user=user,
+            channel__is_music=True,
+            channel__is_active=True
+        ).select_related('channel')
+
 class UserYouTubeChannel(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     channel = models.ForeignKey(YoutubeChannel, on_delete=models.CASCADE)
