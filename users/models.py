@@ -376,3 +376,22 @@ class YoutubeAccount(models.Model):
     class Meta:
         verbose_name = "YouTube Account"
         verbose_name_plural = "YouTube Accounts"
+
+class YouTubeChannel(models.Model):
+    channel_id = models.CharField(max_length=255, unique=True)
+    title = models.CharField(max_length=255)
+
+    is_music = models.BooleanField(default=False)
+    confidence_score = models.FloatField(null=True, blank=True)
+
+    # meta
+    last_classified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "YouTube Channel"
+        verbose_name_plural = "YouTube Channels"
+
+    def __str__(self):
+        return self.title
