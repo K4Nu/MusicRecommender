@@ -412,8 +412,16 @@ class YoutubeAccount(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    objects = YoutubeAccountManager()
+
     def is_token_expired(self):
+        """Sprawdza czy token wygasł"""
         return timezone.now() > self.expires_at
+
+    def needs_token_refresh(self):
+        """Sprawdza czy token wymaga odświeżenia (wygasa w ciągu 5 min)"""
+        threshold = timezone.now() + timedelta(minutes=5)
+        return self.expires_at < threshold
 
     def __str__(self):
         return f"{self.user.email} - {self.youtube_id}"
@@ -421,6 +429,11 @@ class YoutubeAccount(models.Model):
     class Meta:
         verbose_name = "YouTube Account"
         verbose_name_plural = "YouTube Accounts"
+        indexes = [
+            models.Index(fields=['expires_at']),
+            models.Index(fields=['last_synced_at']),
+        ]
+
 
 class YoutubeChannel(models.Model):
     channel_id = models.CharField(max_length=255, unique=True)
