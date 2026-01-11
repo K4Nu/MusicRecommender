@@ -454,7 +454,7 @@ class YoutubeChannel(models.Model):
     def __str__(self):
         return self.title
 
-class UserYouTubeChannelManager(models.Manager):
+class UserYoutubeChannelManager(models.Manager):
     """Manager do wygodnych zapytań o subskrypcje"""
 
     def for_user(self, user):
@@ -469,18 +469,35 @@ class UserYouTubeChannelManager(models.Manager):
             channel__is_active=True
         ).select_related('channel')
 
-class UserYouTubeChannel(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
-    channel = models.ForeignKey(YoutubeChannel, on_delete=models.CASCADE)
+
+class UserYoutubeChannel(models.Model):
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='youtube_subscriptions'
+    )
+    channel = models.ForeignKey(
+        YoutubeChannel,
+        on_delete=models.CASCADE,
+        related_name='subscribers'
+    )
 
     subscribed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    # 🔔 Dodatkowe opcje
+    notifications_enabled = models.BooleanField(default=True)
+
+    objects = UserYoutubeChannelManager()
 
     class Meta:
         unique_together = ("user", "channel")
         verbose_name = "User YouTube Channel"
         verbose_name_plural = "User YouTube Channels"
+        indexes = [
+            models.Index(fields=['user', 'created_at']),
+            models.Index(fields=['channel', 'notifications_enabled']),
+        ]
 
     def __str__(self):
-        return f"{self.user_id} -> {self.channel.title}"
-
+        return f"{self.user.username} -> {self.channel.title}"
