@@ -1,13 +1,46 @@
 from django.contrib.auth.models import BaseUserManager
 from django.contrib.auth.models import AbstractBaseUser
 from django.contrib.auth.models import PermissionsMixin
-from django.db import models
 from django.db.models import Q
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
+from django.db import models
+from django.contrib.auth.models import User
 from django.utils import timezone
+from django.conf import settings
 from datetime import timedelta
+from cryptography.fernet import Fernet
+import base64
+
+
+class EncryptedTextField(models.TextField):
+    """Pole tekstowe z automatycznym szyfrowaniem/deszyfrowaniem"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        key = base64.urlsafe_b64encode(settings.SECRET_KEY[:32].encode().ljust(32)[:32])
+        self.cipher = Fernet(key)
+
+    def get_prep_value(self, value):
+        if value is None:
+            return value
+        encrypted = self.cipher.encrypt(value.encode())
+        return encrypted.decode()
+
+    def from_db_value(self, value, expression, connection):
+        if value is None:
+            return value
+        # Deszyfruj po pobraniu z bazy
+        return self.cipher.decrypt(value.encode()).decode()
+
+    def to_python(self, value):
+        if isinstance(value, str) and value:
+            try:
+                return self.cipher.decrypt(value.encode()).decode()
+            except:
+                return value
+        return value
 
 
 class MyUserManager(BaseUserManager):
@@ -377,7 +410,7 @@ class YoutubeAccount(models.Model):
         verbose_name = "YouTube Account"
         verbose_name_plural = "YouTube Accounts"
 
-class YouTubeChannel(models.Model):
+class YoutubeChannel(models.Model):
     channel_id = models.CharField(max_length=255, unique=True)
     title = models.CharField(max_length=255)
 
@@ -395,3 +428,19 @@ class YouTubeChannel(models.Model):
 
     def __str__(self):
         return self.title
+
+class UserYouTubeChannel(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    channel = models.ForeignKey(YoutubeChannel, on_delete=models.CASCADE)
+
+    subscribed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("user", "channel")
+        verbose_name = "User YouTube Channel"
+        verbose_name_plural = "User YouTube Channels"
+
+    def __str__(self):
+        return f"{self.user_id} -> {self.channel.title}"
+
