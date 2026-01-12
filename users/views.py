@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions, status
 from .tasks.spotify_tasks import fetch_spotify_initial_data,youtube_test_fetch,check_youtube_channel_category,fetch_recently_played
-from users.models import SpotifyAccount,UserTopItem,YoutubeAccount
+from users.models import SpotifyAccount,UserTopItem,YoutubeAccount,UserYoutubeChannel
 from rest_framework import generics
 from .serializers import UserTopTrackSerializer
 from drf_spectacular.utils import extend_schema
@@ -249,7 +249,8 @@ class YoutubeConnect(APIView):
             )
 
         access_token = token_json.get("access_token")
-        refresh_token = token_json.get("refresh_token")
+        if token_json.get("refresh_token"):
+            refresh_token = token_json.get("refresh_token")
         expires_in = token_json.get("expires_in", 3600)
 
         if not access_token:
@@ -273,7 +274,7 @@ class YoutubeConnect(APIView):
         # Zapisz konto
         expires_at = timezone.now() + timedelta(seconds=expires_in)
 
-        from .models import YoutubeAccount
+
         youtube_account, created = YoutubeAccount.objects.update_or_create(
             user=request.user,
             defaults={
@@ -284,14 +285,11 @@ class YoutubeConnect(APIView):
             }
         )
 
+        #sync_youtube_user
+
         action = "created" if created else "updated"
         print(f"✅ YouTube account {action} for user {request.user.email}")
 
-        check_youtube_channel_category.delay(
-            access_token=access_token,
-            channel_id=youtube_id,
-            user_id=request.user.id
-        )
 
         return Response(
             {

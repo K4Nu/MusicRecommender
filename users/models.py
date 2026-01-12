@@ -426,6 +426,13 @@ class YoutubeAccount(models.Model):
     def __str__(self):
         return f"{self.user.email} - {self.youtube_id}"
 
+    def update_tokens(self, access_token, refresh_token=None, expires_in=3600):
+        self.access_token = access_token
+        if refresh_token:
+            self.refresh_token = refresh_token
+        self.expires_at = timezone.now() + timedelta(seconds=expires_in)
+        self.save()
+
     class Meta:
         verbose_name = "YouTube Account"
         verbose_name_plural = "YouTube Accounts"
