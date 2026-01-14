@@ -8,10 +8,10 @@ logger = logging.getLogger(__name__)
 
 def sync_youtube_user(youtube_account):
     """
-    Sync user YouTube subcriptions:
-    - fetch user subsribed channels
-    - tworzy YoutubeChannel
-    - tworzy UserYoutubeChannel
+    Sync user YouTube subscriptions:
+    - fetch user subscribed channels
+    - creates YoutubeChannel
+    - creates UserYoutubeChannel
     """
 
     url = "https://www.googleapis.com/youtube/v3/subscriptions"
@@ -35,6 +35,21 @@ def sync_youtube_user(youtube_account):
 
         items = data.get("items", [])
 
+        # Get all existing channel IDs for this batch
+        channel_ids = [
+            item.get("snippet", {}).get("resourceId", {}).get("channelId")
+            for item in items
+        ]
+        channel_ids = [cid for cid in channel_ids if cid]  # Filter out None values
+
+        existing_channels = {
+            ch.channel_id: ch
+            for ch in YoutubeChannel.objects.filter(channel_id__in=channel_ids)
+        }
+
+        channels_to_create = []
+        channels_to_update = []
+
         for item in items:
             snippet = item.get("snippet", {})
             resource = snippet.get("resourceId", {})
@@ -46,27 +61,69 @@ def sync_youtube_user(youtube_account):
                 continue
 
             # 🔹 1. Global channel
-            channel, _ = YoutubeChannel.objects.get_or_create(
-                channel_id=channel_id,
-                defaults={
-                    "title": title,
-                }
-            )
+            if channel_id not in existing_channels:
+                channel = YoutubeChannel(
+                    channel_id=channel_id,
+                    title=title,
+                )
+                channels_to_create.append(channel)
 
-            # 🔹 2.user ↔ channel
-            UserYoutubeChannel.objects.get_or_create(
+        # Bulk create new channels
+        if channels_to_create:
+            YoutubeChannel.objects.bulk_create(channels_to_create, ignore_conflicts=True)
+
+
+        # Refresh channel lookup after creation
+        all_channels = {
+            ch.channel_id: ch
+            for ch in YoutubeChannel.objects.filter(channel_id__in=channel_ids)
+        }
+
+        # 🔹 2. user ↔ channel (BULK OPERATION)
+        # Get existing user-channel relationships
+        existing_user_channels = set(
+            UserYoutubeChannel.objects.filter(
                 user=youtube_account.user,
-                channel=channel,
-                defaults={
-                    "subscribed_at": snippet.get("publishedAt"),
-                }
+                channel_id__in=[ch.id for ch in all_channels.values()]
+            ).values_list('channel_id', flat=True)
+        )
+
+        user_channels_to_create = []
+
+        for item in items:
+            snippet = item.get("snippet", {})
+            resource = snippet.get("resourceId", {})
+            channel_id = resource.get("channelId")
+
+            if not channel_id or channel_id not in all_channels:
+                continue
+
+            channel = all_channels[channel_id]
+
+            # Only create if relationship doesn't exist
+            if channel.id not in existing_user_channels:
+                user_channels_to_create.append(
+                    UserYoutubeChannel(
+                        user=youtube_account.user,
+                        channel=channel,
+                        subscribed_at=snippet.get("publishedAt"),
+                    )
+                )
+
+        # Bulk create user-channel relationships
+        if user_channels_to_create:
+            UserYoutubeChannel.objects.bulk_create(
+                user_channels_to_create,
+                ignore_conflicts=True
             )
 
         # pagination
-        url = data.get("nextPageToken")
-        if url:
-            params["pageToken"] = url
+        next_token = data.get("nextPageToken")
+        if next_token:
+            params["pageToken"] = next_token
             url = "https://www.googleapis.com/youtube/v3/subscriptions"
+        else:
+            url = None
 
     youtube_account.last_synced_at = timezone.now()
     youtube_account.save(update_fields=["last_synced_at"])
