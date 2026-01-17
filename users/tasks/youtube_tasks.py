@@ -1,22 +1,41 @@
 import requests
 from django.utils import timezone
-from users.models import YoutubeChannel, UserYoutubeChannel
+from users.models import YoutubeChannel, UserYoutubeChannel, YoutubeAccount
 import logging
+from celery import shared_task
+from users.youtube_classifiers import compute_music_score
+from users.services import ensure_youtube_token
 
 logger = logging.getLogger(__name__)
 
+@shared_task
+def sync_youtube_user(youtube_account_id):
 
-def sync_youtube_user(youtube_account):
+    new_channels_data=fetch_user_channels(youtube_account_id)
+    try:
+        access_code=YoutubeAccount.objects.get(youtube_account_id=youtube_account_id).access_code
+    except YoutubeAccount.DoesNotExist:
+        logger.info('Youtube Account does not exist')
+        return
+    classify_channels(new_channels_data, youtube_account_id)
+
+
+def fetch_user_channels(youtube_account):
     """
     Sync user YouTube subscriptions:
     - fetch user subscribed channels
     - creates YoutubeChannel
     - creates UserYoutubeChannel
     """
-
+    try:
+        account=YoutubeAccount.objects.get(id=youtube_account)
+    except YoutubeAccount.DoesNotExist:
+        logger.error("YouTube account does not exist")
+        return
+    token=ensure_youtube_token(account.user)
     url = "https://www.googleapis.com/youtube/v3/subscriptions"
     headers = {
-        "Authorization": f"Bearer {youtube_account.access_token}"
+        "Authorization": f"Bearer {token}"
     }
     params = {
         "part": "snippet",
@@ -72,6 +91,11 @@ def sync_youtube_user(youtube_account):
         if channels_to_create:
             YoutubeChannel.objects.bulk_create(channels_to_create, ignore_conflicts=True)
 
+        existing_channels_ids=set(existing_channels.keys())
+        new_channels_ids=set(channel_ids)-existing_channels_ids
+        created_channels=YoutubeChannel.objects.filter(
+            channel_id__in=new_channels_ids
+        )
 
         # Refresh channel lookup after creation
         all_channels = {
@@ -117,6 +141,7 @@ def sync_youtube_user(youtube_account):
                 ignore_conflicts=True
             )
 
+            
         # pagination
         next_token = data.get("nextPageToken")
         if next_token:
@@ -127,3 +152,51 @@ def sync_youtube_user(youtube_account):
 
     youtube_account.last_synced_at = timezone.now()
     youtube_account.save(update_fields=["last_synced_at"])
+    return created_channels
+
+
+@shared_task
+def classify_channels(channels,youtube_account_id):
+    try:
+        account = YoutubeAccount.objects.get(id=youtube_account_id)
+    except YoutubeAccount.DoesNotExist:
+        logger.error("YouTube account does not exist")
+        return
+    token = ensure_youtube_token(account.user)
+    for ids in channels:
+        classify_channel.delay(ids,token)
+
+@shared_task(bind=True,max_retries=3)
+def classify_channel(channel_id,youtube_account_id):
+    try:
+        account = YoutubeAccount.objects.get(id=youtube_account_id)
+    except YoutubeAccount.DoesNotExist:
+        logger.error("YouTube account does not exist")
+        return
+    token = ensure_youtube_token(account.user)
+    try:
+        channel=YoutubeChannel.objects.get(id=channel_id)
+    except YoutubeChannel.DoesNotExist:
+        return
+
+    url='https://www.googleapis.com/youtube/v3/channels/'
+    params = {
+        'part': 'snippet,topicDetails',
+        'id': channel_id,
+    }
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        data=response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"[check_youtube_channel_category] error: {e}")
+        return
+
+    items=data.get('items',[])
+    if not items:
+        return
+    snippet = items[0].get("snippet", {})
+    channel_name = snippet.get("title", "Unknown")
+    #fetch_channel_recent_videos
+
