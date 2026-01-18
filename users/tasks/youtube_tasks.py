@@ -8,19 +8,16 @@ from users.services import ensure_youtube_token
 
 logger = logging.getLogger(__name__)
 
+
 @shared_task
 def sync_youtube_user(youtube_account_id):
-
-    new_channels_data=fetch_user_channels(youtube_account_id)
-    try:
-        access_code=YoutubeAccount.objects.get(youtube_account_id=youtube_account_id).access_code
-    except YoutubeAccount.DoesNotExist:
-        logger.info('Youtube Account does not exist')
-        return
-    classify_channels(new_channels_data, youtube_account_id)
+    created_channels = fetch_user_channels(youtube_account_id)
+    if created_channels:
+        channel_ids = [ch.id for ch in created_channels]
+        classify_channels.delay(channel_ids, youtube_account_id)
 
 
-def fetch_user_channels(youtube_account):
+def fetch_user_channels(youtube_account_id):
     """
     Sync user YouTube subscriptions:
     - fetch user subscribed channels
@@ -28,20 +25,21 @@ def fetch_user_channels(youtube_account):
     - creates UserYoutubeChannel
     """
     try:
-        account=YoutubeAccount.objects.get(id=youtube_account)
+        account = YoutubeAccount.objects.get(id=youtube_account_id)
     except YoutubeAccount.DoesNotExist:
         logger.error("YouTube account does not exist")
-        return
-    token=ensure_youtube_token(account.user)
+        return []
+
+    token = ensure_youtube_token(account.user)
     url = "https://www.googleapis.com/youtube/v3/subscriptions"
-    headers = {
-        "Authorization": f"Bearer {token}"
-    }
+    headers = {"Authorization": f"Bearer {token}"}
     params = {
         "part": "snippet",
         "mine": "true",
         "maxResults": 50,
     }
+
+    all_created_channels = []
 
     while url:
         try:
@@ -50,7 +48,7 @@ def fetch_user_channels(youtube_account):
             data = response.json()
         except requests.exceptions.RequestException as e:
             logger.error(f"YouTube subscriptions sync failed: {e}")
-            return
+            return all_created_channels
 
         items = data.get("items", [])
 
@@ -59,7 +57,7 @@ def fetch_user_channels(youtube_account):
             item.get("snippet", {}).get("resourceId", {}).get("channelId")
             for item in items
         ]
-        channel_ids = [cid for cid in channel_ids if cid]  # Filter out None values
+        channel_ids = [cid for cid in channel_ids if cid]
 
         existing_channels = {
             ch.channel_id: ch
@@ -67,7 +65,6 @@ def fetch_user_channels(youtube_account):
         }
 
         channels_to_create = []
-        channels_to_update = []
 
         for item in items:
             snippet = item.get("snippet", {})
@@ -79,7 +76,6 @@ def fetch_user_channels(youtube_account):
             if not channel_id:
                 continue
 
-            # 🔹 1. Global channel
             if channel_id not in existing_channels:
                 channel = YoutubeChannel(
                     channel_id=channel_id,
@@ -91,11 +87,13 @@ def fetch_user_channels(youtube_account):
         if channels_to_create:
             YoutubeChannel.objects.bulk_create(channels_to_create, ignore_conflicts=True)
 
-        existing_channels_ids=set(existing_channels.keys())
-        new_channels_ids=set(channel_ids)-existing_channels_ids
-        created_channels=YoutubeChannel.objects.filter(
+        existing_channels_ids = set(existing_channels.keys())
+        new_channels_ids = set(channel_ids) - existing_channels_ids
+        created_channels = YoutubeChannel.objects.filter(
             channel_id__in=new_channels_ids
         )
+
+        all_created_channels.extend(list(created_channels))
 
         # Refresh channel lookup after creation
         all_channels = {
@@ -103,11 +101,10 @@ def fetch_user_channels(youtube_account):
             for ch in YoutubeChannel.objects.filter(channel_id__in=channel_ids)
         }
 
-        # 🔹 2. user ↔ channel (BULK OPERATION)
         # Get existing user-channel relationships
         existing_user_channels = set(
             UserYoutubeChannel.objects.filter(
-                user=youtube_account.user,
+                user=account.user,
                 channel_id__in=[ch.id for ch in all_channels.values()]
             ).values_list('channel_id', flat=True)
         )
@@ -124,24 +121,21 @@ def fetch_user_channels(youtube_account):
 
             channel = all_channels[channel_id]
 
-            # Only create if relationship doesn't exist
             if channel.id not in existing_user_channels:
                 user_channels_to_create.append(
                     UserYoutubeChannel(
-                        user=youtube_account.user,
+                        user=account.user,
                         channel=channel,
                         subscribed_at=snippet.get("publishedAt"),
                     )
                 )
 
-        # Bulk create user-channel relationships
         if user_channels_to_create:
             UserYoutubeChannel.objects.bulk_create(
                 user_channels_to_create,
                 ignore_conflicts=True
             )
 
-            
         # pagination
         next_token = data.get("nextPageToken")
         if next_token:
@@ -150,53 +144,113 @@ def fetch_user_channels(youtube_account):
         else:
             url = None
 
-    youtube_account.last_synced_at = timezone.now()
-    youtube_account.save(update_fields=["last_synced_at"])
-    return created_channels
+    account.last_synced_at = timezone.now()
+    account.save(update_fields=["last_synced_at"])
+    return all_created_channels
+
+
+def fetch_channel_recent_videos(channel_id, youtube_account_id):
+    try:
+        account = YoutubeAccount.objects.get(id=youtube_account_id)
+    except YoutubeAccount.DoesNotExist:
+        logger.error("YouTube account does not exist")
+        return []
+
+    token = ensure_youtube_token(account.user)
+    search_url = "https://www.googleapis.com/youtube/v3/search"
+    headers = {"Authorization": f"Bearer {token}"}
+    params = {
+        "part": "snippet",
+        "channelId": channel_id,
+        "type": "video",
+        "order": "date",
+        "maxResults": 20,
+    }
+
+    try:
+        response = requests.get(search_url, headers=headers, params=params, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to fetch videos for channel {channel_id}: {e}")
+        return []
+
+    video_ids = [item["id"]["videoId"] for item in data.get("items", [])]
+    if not video_ids or len(video_ids) < 5:
+        return []
+
+    videos_url = "https://www.googleapis.com/youtube/v3/videos"
+    params = {"part": "snippet", "id": ",".join(video_ids)}
+
+    try:
+        r = requests.get(videos_url, headers=headers, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to fetch video details for channel {channel_id}: {e}")
+        return []
+
+    return [
+        int(item["snippet"]["categoryId"])
+        for item in data.get("items", [])
+        if "snippet" in item and "categoryId" in item["snippet"]
+    ]
 
 
 @shared_task
-def classify_channels(channels,youtube_account_id):
-    try:
-        account = YoutubeAccount.objects.get(id=youtube_account_id)
-    except YoutubeAccount.DoesNotExist:
-        logger.error("YouTube account does not exist")
-        return
-    token = ensure_youtube_token(account.user)
-    for ids in channels:
-        classify_channel.delay(ids,token)
-
-@shared_task(bind=True,max_retries=3)
-def classify_channel(channel_id,youtube_account_id):
-    try:
-        account = YoutubeAccount.objects.get(id=youtube_account_id)
-    except YoutubeAccount.DoesNotExist:
-        logger.error("YouTube account does not exist")
-        return
-    token = ensure_youtube_token(account.user)
-    try:
-        channel=YoutubeChannel.objects.get(id=channel_id)
-    except YoutubeChannel.DoesNotExist:
+def classify_channels(channel_ids, youtube_account_id):
+    """Klasyfikuj kanały - channel_ids to lista ID kanałów"""
+    if not channel_ids:
         return
 
-    url='https://www.googleapis.com/youtube/v3/channels/'
+    for channel_id in channel_ids:
+        classify_channel.delay(channel_id, youtube_account_id)
+
+
+@shared_task(bind=True, max_retries=3)
+def classify_channel(self, channel_id, youtube_account_id):
+    try:
+        account = YoutubeAccount.objects.get(id=youtube_account_id)
+        token = ensure_youtube_token(account.user)
+        channel = YoutubeChannel.objects.get(id=channel_id)
+    except (YoutubeAccount.DoesNotExist, YoutubeChannel.DoesNotExist) as e:
+        logger.error(f"Channel classification failed: {e}")
+        return
+
+    url = 'https://www.googleapis.com/youtube/v3/channels/'
     params = {
         'part': 'snippet,topicDetails',
-        'id': channel_id,
+        'id': channel.channel_id,
     }
     headers = {"Authorization": f"Bearer {token}"}
+
     try:
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers, params=params, timeout=15)
         response.raise_for_status()
-        data=response.json()
+        data = response.json()
     except requests.exceptions.RequestException as e:
-        print(f"[check_youtube_channel_category] error: {e}")
+        logger.error(f"YouTube API error for channel {channel_id}: {e}")
+        # Spróbuj ponownie za 60 sekund
+        raise self.retry(exc=e, countdown=60)
+
+    items = data.get('items', [])
+    if not items:
+        logger.warning(f"No data returned for channel {channel_id}")
         return
 
-    items=data.get('items',[])
-    if not items:
-        return
     snippet = items[0].get("snippet", {})
     channel_name = snippet.get("title", "Unknown")
-    #fetch_channel_recent_videos
+    channel_videos = fetch_channel_recent_videos(channel.channel_id, youtube_account_id)
+    result = compute_music_score(data, channel_videos)
 
+    if result.get("is_music"):
+        logger.info(
+            f"[MUSIC] {channel_name} (score={result['total_score']}, "
+            f"topics={result['score_topics']}, text={result['score_text']}, "
+            f"videos={result['score_videos']})"
+        )
+
+    channel.is_music = result.get("is_music", False)
+    channel.confidence_score = result["total_score"]
+    channel.last_classified_at = timezone.now()
+    channel.save(update_fields=["is_music", "confidence_score", "last_classified_at"])
