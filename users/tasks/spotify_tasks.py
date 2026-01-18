@@ -1,4 +1,4 @@
-from celery import shared_task
+from celery import shared_task,chord
 from django.utils import timezone
 from datetime import timedelta, datetime
 import requests
@@ -281,27 +281,38 @@ def fetch_saved_tracks(headers, user_id):
         logger.error("Failed to fetch saved tracks", exc_info=e)
 
 @shared_task
+def spotify_sync_finished(results, user_id):
+    logger.info(f"✅ FULL Spotify sync finished for user {user_id}")
+
+@shared_task
 def sync_user_playlists(user_id):
     try:
         with ResourceLock("playlists_sync",user_id, timeout=900):
             changed_playlists = fetch_spotify_playlists(user_id)
-
-            for playlist_id in changed_playlists:
-                fetch_playlist_tracks.delay(playlist_id)
+            if not changed_playlists:
+                spotify_sync_finished.delay(user_id)
+                return
+            chord(
+                fetch_playlist_tracks.s(pid)
+                for pid in changed_playlists
+            )(spotify_sync_finished.s(user_id))
     except ResourceLockedException:
         logger.info(f"User {user_id} playlists sync already in progress, skipping")
         return
 
 def fetch_spotify_playlists(user_id):
-
     user = User.objects.get(id=user_id)
     spotify = ensure_spotify_token(user)
     if not spotify:
-        return
+        return []
 
-    headers = {"Authorization": f"Bearer {spotify.access_token}"}
+    headers = {
+        "Authorization": f"Bearer {spotify.access_token}"
+    }
+
     if spotify.playlists_etag:
-        headers["If-None-Match"]=spotify.playlists_etag
+        headers["If-None-Match"] = spotify.playlists_etag
+
     url = "https://api.spotify.com/v1/me/playlists"
     now = timezone.now()
 
@@ -313,20 +324,23 @@ def fetch_spotify_playlists(user_id):
     to_create = []
     to_update = []
     changed_playlists = []
-    first_page=True
+    first_page = True
 
     while url:
         response = requests.get(url, headers=headers, params={"limit": 50})
+
         if response.status_code == 304:
             spotify.last_synced_at = timezone.now()
             spotify.save(update_fields=["last_synced_at"])
             return []
+
         response.raise_for_status()
+
         if first_page:
             spotify.playlists_etag = response.headers.get("ETag")
             spotify.save(update_fields=["playlists_etag"])
             headers.pop("If-None-Match", None)
-            first_page=False
+            first_page = False
 
         data = response.json()
 
@@ -349,18 +363,21 @@ def fetch_spotify_playlists(user_id):
             playlist = existing.get(item["id"])
 
             if playlist:
-                if playlist.snapshot_id!=item.get("snapshot_id"):
+                if playlist.snapshot_id != item.get("snapshot_id"):
                     changed_playlists.append(playlist.id)
+
                 for field, value in defaults.items():
                     setattr(playlist, field, value)
+
                 to_update.append(playlist)
             else:
                 to_create.append(
                     SpotifyPlaylist(
                         spotify_id=item["id"],
-                        **defaults
+                        **defaults,
                     )
                 )
+
         url = data.get("next")
 
     if to_create:
@@ -387,15 +404,17 @@ def fetch_spotify_playlists(user_id):
                 "external_url",
                 "snapshot_id",
                 "last_synced_at",
-            ]
+            ],
         )
+
     return changed_playlists
 
 
 @shared_task(bind=True, max_retries=3)
 def fetch_playlist_tracks(self, playlist_id):
     try:
-        with ResourceLock('playlist_sync', playlist_id, timeout=600):
+        with ResourceLock("playlist_sync", playlist_id, timeout=600):
+
             try:
                 playlist = SpotifyPlaylist.objects.get(id=playlist_id)
             except SpotifyPlaylist.DoesNotExist:
@@ -420,6 +439,7 @@ def fetch_playlist_tracks(self, playlist_id):
             url = f"https://api.spotify.com/v1/playlists/{playlist.spotify_id}/tracks"
 
             relations = []
+            seen_track_ids = set()
             position = 0
             first_page = True
 
@@ -452,7 +472,7 @@ def fetch_playlist_tracks(self, playlist_id):
                     playlist.tracks_etag = r.headers.get("ETag")
                     playlist.save(update_fields=["tracks_etag"])
 
-                    # ❗ dopiero TERAZ kasujemy stare tracki
+                    # ❗ FULL REPLACE — kasujemy stare tracki
                     SpotifyPlaylistTrack.objects.filter(
                         playlist=playlist
                     ).delete()
@@ -460,6 +480,7 @@ def fetch_playlist_tracks(self, playlist_id):
                     headers.pop("If-None-Match", None)
                     first_page = False
 
+                # --- zapis tracków ---
                 tracks_data = []
                 for item in data.get("items", []):
                     track_data = item.get("track")
@@ -469,17 +490,30 @@ def fetch_playlist_tracks(self, playlist_id):
                 tracks_cache = save_tracks_bulk(tracks_data)
 
                 for item in data.get("items", []):
-                    track = tracks_cache.get(item.get("track", {}).get("id"))
-                    if track:
-                        relations.append(
-                            SpotifyPlaylistTrack(
-                                playlist=playlist,
-                                track=track,
-                                position=position,
-                                added_at=item.get("added_at"),
-                            )
+                    track_data = item.get("track")
+                    track_id = track_data.get("id") if track_data else None
+
+                    if not track_id:
+                        continue
+
+                    # 🔒 deduplikacja globalna (cała playlista)
+                    if track_id in seen_track_ids:
+                        continue
+                    seen_track_ids.add(track_id)
+
+                    track = tracks_cache.get(track_id)
+                    if not track:
+                        continue
+
+                    relations.append(
+                        SpotifyPlaylistTrack(
+                            playlist=playlist,
+                            track=track,
+                            position=position,
+                            added_at=item.get("added_at"),
                         )
-                        position += 1
+                    )
+                    position += 1
 
                 url = data.get("next")
 
@@ -494,9 +528,10 @@ def fetch_playlist_tracks(self, playlist_id):
             ])
 
     except ResourceLockedException:
-        logger.warning(f"Playlist {playlist_id} sync already in progress, skipping")
+        logger.warning(
+            f"Playlist {playlist_id} sync already in progress, skipping"
+        )
         return
-
 
 
 def save_artists_bulk(artists_data):
