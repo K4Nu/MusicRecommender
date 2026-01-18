@@ -56,3 +56,6 @@ class ResourceLock():
         """Automatically release lock when exiting context"""
         self.release()
         return False
+
+class ResourceLockedException(Exception):
+    """Raised when trying to acquire an already locked resource"""
