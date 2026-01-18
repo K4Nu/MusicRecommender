@@ -28,52 +28,58 @@ def parse_spotify_release_date(value: str):
 
     return None
 
+
 @shared_task
 def fetch_spotify_initial_data(user_id):
     """
     Fetch initial data from Spotify
     """
     try:
-        spotify_account = SpotifyAccount.objects.get(user_id=user_id)
-    except SpotifyAccount.DoesNotExist:
-        logger.warning(f"SpotifyAccount not found for user {user_id}")
+        with ResourceLock('spotify_initial_sync', user_id, timeout=1800):
+            try:
+                spotify_account = SpotifyAccount.objects.get(user_id=user_id)
+            except SpotifyAccount.DoesNotExist:
+                logger.error(f"SpotifyAccount not found for user {user_id}")
+                return
+
+            spotify = ensure_spotify_token(spotify_account.user)
+            if not spotify:
+                return
+
+            access_token = spotify.access_token
+            if not access_token:
+                logger.error(f"Failed to get valid token for user {user_id}")
+                return
+
+            headers = {"Authorization": f"Bearer {access_token}"}
+
+            # 1. Top Artists (short, medium, long term)
+            fetch_top_items(headers, "artists", "short_term", user_id)
+            fetch_top_items(headers, "artists", "medium_term", user_id)
+            fetch_top_items(headers, "artists", "long_term", user_id)
+
+            # 2. Top Tracks (short, medium, long term)
+            fetch_top_items(headers, "tracks", "short_term", user_id)
+            fetch_top_items(headers, "tracks", "medium_term", user_id)
+            fetch_top_items(headers, "tracks", "long_term", user_id)
+
+            # 3. Recently Played
+            fetch_recently_played(headers, user_id)
+
+            # 4. Saved Tracks
+            fetch_saved_tracks(headers, user_id)
+
+            # 5. Playlists
+            sync_user_playlists.delay(user_id)
+
+            spotify_account.last_synced_at = timezone.now()
+            spotify_account.save(update_fields=["last_synced_at"])
+
+            logger.info(f"✅ Initial Spotify data fetched for user {user_id}")
+
+    except ResourceLockedException:
+        logger.info(f"User {user_id} initial sync already in progress, skipping")
         return
-
-    spotify=ensure_spotify_token(spotify_account.user)
-    if not spotify:
-        return
-    access_token = spotify.access_token
-    if not access_token:
-        logger.info(f"Failed to get valid token for user {user_id}")
-        return
-
-    headers = {"Authorization": f"Bearer {access_token}"}
-
-    # 1. Top Artists (short, medium, long term)
-    fetch_top_items(headers, "artists", "short_term", user_id)
-    fetch_top_items(headers, "artists", "medium_term", user_id)
-    fetch_top_items(headers, "artists", "long_term", user_id)
-
-    # 2. Top Tracks (short, medium, long term)
-    fetch_top_items(headers, "tracks", "short_term", user_id)
-    fetch_top_items(headers, "tracks", "medium_term", user_id)
-    fetch_top_items(headers, "tracks", "long_term", user_id)
-
-    # 3. Recently Played
-    fetch_recently_played(headers, user_id)
-
-    # 4. Saved Tracks
-    fetch_saved_tracks(headers, user_id)
-
-    # 5. Playlists
-    sync_user_playlists.delay(user_id)
-
-    # Zaktualizuj last_synced_at
-    spotify_account.last_synced_at = timezone.now()
-    spotify_account.save()
-
-    logger.info(f"✅ Initial Spotify data fetched for user {user_id}")
-
 
 def fetch_top_items(headers, item_type, time_range, user_id):
     """
@@ -275,10 +281,15 @@ def fetch_saved_tracks(headers, user_id):
 
 @shared_task
 def sync_user_playlists(user_id):
-    changed_playlists = fetch_spotify_playlists(user_id)
+    try:
+        with ResourceLock("playlists_sync",user_id, timeout=900):
+            changed_playlists = fetch_spotify_playlists(user_id)
 
-    for playlist_id in changed_playlists:
-        fetch_playlist_tracks.delay(playlist_id)
+            for playlist_id in changed_playlists:
+                fetch_playlist_tracks.delay(playlist_id)
+    except ResourceLockedException:
+        logger.info(f"User {user_id} playlists sync already in progress, skipping")
+        return
 
 def fetch_spotify_playlists(user_id):
 
