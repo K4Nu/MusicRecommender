@@ -30,6 +30,7 @@ def ensure_spotify_token(user):
 
     if spotify.expires_at <= timezone.now():
         refresh_spotify_account(spotify)
+    return spotify
 
 
 def refresh_youtube_account(youtube):
@@ -60,6 +61,7 @@ def ensure_youtube_token(user):
 
     if youtube.expires_at <= timezone.now():
         refresh_youtube_account(youtube)
+    return youtube
 
 
 def ensure_valid_external_tokens(user):

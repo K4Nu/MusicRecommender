@@ -8,7 +8,8 @@ from djoser.serializers import UserSerializer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions, status
-from .tasks.spotify_tasks import fetch_spotify_initial_data,youtube_test_fetch,check_youtube_channel_category,fetch_recently_played
+from .tasks.spotify_tasks import fetch_spotify_initial_data,fetch_recently_played
+from .tasks.youtube_tasks import sync_youtube_user
 from users.models import SpotifyAccount,UserTopItem,YoutubeAccount,UserYoutubeChannel
 from rest_framework import generics
 from .serializers import UserTopTrackSerializer
@@ -285,7 +286,7 @@ class YoutubeConnect(APIView):
             }
         )
 
-        #sync_youtube_user
+        sync_youtube_user(youtube_account.id)
 
         action = "created" if created else "updated"
         print(f"✅ YouTube account {action} for user {request.user.email}")
