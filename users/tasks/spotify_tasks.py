@@ -44,6 +44,7 @@ def fetch_spotify_initial_data(user_id):
 
             spotify = ensure_spotify_token(spotify_account.user)
             if not spotify:
+                logger.error(f"Spotify token not found for user {user_id}")
                 return
 
             access_token = spotify.access_token

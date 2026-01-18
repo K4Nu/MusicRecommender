@@ -1,5 +1,4 @@
-from datetime import time
-
+import time
 from django.core.cache import cache
 from functools import wraps
 import logging

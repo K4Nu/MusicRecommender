@@ -175,7 +175,7 @@ class Track(models.Model):
     spotify_id = models.CharField(max_length=255, unique=True)
     name=models.CharField(max_length=255)
     artists=models.ManyToManyField(Artist, related_name='tracks')
-    album_name=models.ForeignKey(Album, on_delete=models.CASCADE, related_name='tracks')
+    album=models.ForeignKey(Album, on_delete=models.CASCADE, related_name='tracks')
     duration_ms=models.IntegerField()
     popularity=models.IntegerField(null=True)
     preview_url=models.URLField(null=True,blank=True)
