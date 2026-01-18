@@ -5,6 +5,7 @@ import requests
 from users.models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory, Album, \
     SpotifyPlaylist, SpotifyPlaylistTrack, Genre
 from utils.locks import acquire_playlist_lock, release_playlist_lock
+from utils.locks import ResourceLock,ResourceLockedException
 from django.core.cache import cache
 from requests.exceptions import HTTPError
 from users.youtube_classifiers import compute_music_score
@@ -376,114 +377,111 @@ def fetch_spotify_playlists(user_id):
         )
     return changed_playlists
 
+
 @shared_task(bind=True, max_retries=3)
 def fetch_playlist_tracks(self, playlist_id):
-
-    # 🔒 LOCK — jeśli ktoś już syncuje tę playlistę, wychodzimy
-    if not acquire_playlist_lock(playlist_id):
-        return
-
     try:
-        try:
-            playlist = SpotifyPlaylist.objects.get(id=playlist_id)
-        except SpotifyPlaylist.DoesNotExist:
-            return
-
-        # 🔑 SNAPSHOT GUARD
-        if playlist.tracks_snapshot_id == playlist.snapshot_id:
-            return
-
-        spotify = ensure_spotify_token(playlist.user)
-        if not spotify:
-            return
-
-        headers = {
-            "Authorization": f"Bearer {spotify.access_token}"
-        }
-
-        # 🔑 ETag tylko dla pierwszej strony
-        if playlist.tracks_etag:
-            headers["If-None-Match"] = playlist.tracks_etag
-
-        url = f"https://api.spotify.com/v1/playlists/{playlist.spotify_id}/tracks"
-
-        relations = []
-        position = 0
-        first_page = True
-
-        while url:
+        with ResourceLock('playlist_sync', playlist_id, timeout=600):
             try:
-                r = requests.get(
-                    url,
-                    headers=headers,
-                    params={"limit": 100},
-                    timeout=15
-                )
-            except requests.exceptions.RequestException as e:
-                raise self.retry(exc=e, countdown=30)
-
-            # 🔥 PLAYLIST SIĘ NIE ZMIENIŁA
-            if r.status_code == 304:
-                playlist.tracks_snapshot_id = playlist.snapshot_id
-                playlist.last_synced_at = timezone.now()
-                playlist.save(update_fields=[
-                    "tracks_snapshot_id",
-                    "last_synced_at",
-                ])
+                playlist = SpotifyPlaylist.objects.get(id=playlist_id)
+            except SpotifyPlaylist.DoesNotExist:
                 return
 
-            r.raise_for_status()
-            data = r.json()
+            # 🔑 SNAPSHOT GUARD
+            if playlist.tracks_snapshot_id == playlist.snapshot_id:
+                return
 
-            # 🔑 tylko po pierwszej stronie
-            if first_page:
-                playlist.tracks_etag = r.headers.get("ETag")
-                playlist.save(update_fields=["tracks_etag"])
+            spotify = ensure_spotify_token(playlist.user)
+            if not spotify:
+                return
 
-                # ❗ dopiero TERAZ kasujemy stare tracki
-                SpotifyPlaylistTrack.objects.filter(
-                    playlist=playlist
-                ).delete()
+            headers = {
+                "Authorization": f"Bearer {spotify.access_token}"
+            }
 
-                headers.pop("If-None-Match", None)
-                first_page = False
+            # 🔑 ETag tylko dla pierwszej strony
+            if playlist.tracks_etag:
+                headers["If-None-Match"] = playlist.tracks_etag
 
-            tracks_data = []
-            for item in data.get("items", []):
-                track_data = item.get("track")
-                if track_data and track_data.get("id"):
-                    tracks_data.append(track_data)
+            url = f"https://api.spotify.com/v1/playlists/{playlist.spotify_id}/tracks"
 
-            tracks_cache = save_tracks_bulk(tracks_data)
+            relations = []
+            position = 0
+            first_page = True
 
-            for item in data.get("items", []):
-                track = tracks_cache.get(item.get("track", {}).get("id"))
-                if track:
-                    relations.append(
-                        SpotifyPlaylistTrack(
-                            playlist=playlist,
-                            track=track,
-                            position=position,
-                            added_at=item.get("added_at"),
-                        )
+            while url:
+                try:
+                    r = requests.get(
+                        url,
+                        headers=headers,
+                        params={"limit": 100},
+                        timeout=15
                     )
-                    position += 1
+                except requests.exceptions.RequestException as e:
+                    raise self.retry(exc=e, countdown=30)
 
-            url = data.get("next")
+                # 🔥 PLAYLIST SIĘ NIE ZMIENIŁA
+                if r.status_code == 304:
+                    playlist.tracks_snapshot_id = playlist.snapshot_id
+                    playlist.last_synced_at = timezone.now()
+                    playlist.save(update_fields=[
+                        "tracks_snapshot_id",
+                        "last_synced_at",
+                    ])
+                    return
 
-        if relations:
-            SpotifyPlaylistTrack.objects.bulk_create(relations)
+                r.raise_for_status()
+                data = r.json()
 
-        playlist.tracks_snapshot_id = playlist.snapshot_id
-        playlist.last_synced_at = timezone.now()
-        playlist.save(update_fields=[
-            "tracks_snapshot_id",
-            "last_synced_at",
-        ])
+                # 🔑 tylko po pierwszej stronie
+                if first_page:
+                    playlist.tracks_etag = r.headers.get("ETag")
+                    playlist.save(update_fields=["tracks_etag"])
 
-    finally:
-        # 🔓 ZAWSZE zdejmujemy lock
-        release_playlist_lock(playlist_id)
+                    # ❗ dopiero TERAZ kasujemy stare tracki
+                    SpotifyPlaylistTrack.objects.filter(
+                        playlist=playlist
+                    ).delete()
+
+                    headers.pop("If-None-Match", None)
+                    first_page = False
+
+                tracks_data = []
+                for item in data.get("items", []):
+                    track_data = item.get("track")
+                    if track_data and track_data.get("id"):
+                        tracks_data.append(track_data)
+
+                tracks_cache = save_tracks_bulk(tracks_data)
+
+                for item in data.get("items", []):
+                    track = tracks_cache.get(item.get("track", {}).get("id"))
+                    if track:
+                        relations.append(
+                            SpotifyPlaylistTrack(
+                                playlist=playlist,
+                                track=track,
+                                position=position,
+                                added_at=item.get("added_at"),
+                            )
+                        )
+                        position += 1
+
+                url = data.get("next")
+
+            if relations:
+                SpotifyPlaylistTrack.objects.bulk_create(relations)
+
+            playlist.tracks_snapshot_id = playlist.snapshot_id
+            playlist.last_synced_at = timezone.now()
+            playlist.save(update_fields=[
+                "tracks_snapshot_id",
+                "last_synced_at",
+            ])
+
+    except ResourceLockedException:
+        logger.info(f"Playlist {playlist_id} sync already in progress, skipping")
+        return
 
 
 
