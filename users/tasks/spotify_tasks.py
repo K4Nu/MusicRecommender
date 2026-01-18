@@ -4,7 +4,6 @@ from datetime import timedelta, datetime
 import requests
 from users.models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory, Album, \
     SpotifyPlaylist, SpotifyPlaylistTrack, Genre
-from utils.locks import acquire_playlist_lock, release_playlist_lock
 from utils.locks import ResourceLock,ResourceLockedException
 from django.core.cache import cache
 from requests.exceptions import HTTPError

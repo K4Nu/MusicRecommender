@@ -5,16 +5,22 @@ import logging
 from celery import shared_task
 from users.youtube_classifiers import compute_music_score
 from users.services import ensure_youtube_token
+from utils.locks import ResourceLock, ResourceLockedException
 
 logger = logging.getLogger(__name__)
 
 
 @shared_task
 def sync_youtube_user(youtube_account_id):
-    created_channels = fetch_user_channels(youtube_account_id)
-    if created_channels:
-        channel_ids = [ch.id for ch in created_channels]
-        classify_channels.delay(channel_ids, youtube_account_id)
+    try:
+        with ResourceLock("youtube_user_sync", youtube_account_id, timeout=900):
+            created_channels = fetch_user_channels(youtube_account_id)
+            if created_channels:
+                channel_ids = [ch.id for ch in created_channels]
+                classify_channels.delay(channel_ids, youtube_account_id)
+    except ResourceLockedException:
+        logger.info(f"User {youtube_account_id} sync already in progress, skipping")
+        return
 
 
 def fetch_user_channels(youtube_account_id):
@@ -210,47 +216,52 @@ def classify_channels(channel_ids, youtube_account_id):
 @shared_task(bind=True, max_retries=3)
 def classify_channel(self, channel_id, youtube_account_id):
     try:
-        account = YoutubeAccount.objects.get(id=youtube_account_id)
-        token = ensure_youtube_token(account.user)
-        channel = YoutubeChannel.objects.get(id=channel_id)
-    except (YoutubeAccount.DoesNotExist, YoutubeChannel.DoesNotExist) as e:
-        logger.error(f"Channel classification failed: {e}")
+        with ResourceLock("channel_classify", channel_id, timeout=300):
+            try:
+                account = YoutubeAccount.objects.get(id=youtube_account_id)
+                token = ensure_youtube_token(account.user)
+                channel = YoutubeChannel.objects.get(id=channel_id)
+            except (YoutubeAccount.DoesNotExist, YoutubeChannel.DoesNotExist) as e:
+                logger.error(f"Channel classification failed: {e}")
+                return
+
+            url = 'https://www.googleapis.com/youtube/v3/channels/'
+            params = {
+                'part': 'snippet,topicDetails',
+                'id': channel.channel_id,
+            }
+            headers = {"Authorization": f"Bearer {token}"}
+
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=15)
+                response.raise_for_status()
+                data = response.json()
+            except requests.exceptions.RequestException as e:
+                logger.error(f"YouTube API error for channel {channel_id}: {e}")
+                raise self.retry(exc=e, countdown=60)
+
+            items = data.get('items', [])
+            if not items:
+                logger.warning(f"No data returned for channel {channel_id}")
+                return
+
+            snippet = items[0].get("snippet", {})
+            channel_name = snippet.get("title", "Unknown")
+            channel_videos = fetch_channel_recent_videos(channel.channel_id, youtube_account_id)
+            result = compute_music_score(data, channel_videos)
+
+            if result.get("is_music"):
+                logger.info(
+                    f"[MUSIC] {channel_name} (score={result['total_score']}, "
+                    f"topics={result['score_topics']}, text={result['score_text']}, "
+                    f"videos={result['score_videos']})"
+                )
+
+            channel.is_music = result.get("is_music", False)
+            channel.confidence_score = result["total_score"]
+            channel.last_classified_at = timezone.now()
+            channel.save(update_fields=["is_music", "confidence_score", "last_classified_at"])
+
+    except ResourceLockedException:
+        logger.info(f"Channel {channel_id} is already being classified, skipping")
         return
-
-    url = 'https://www.googleapis.com/youtube/v3/channels/'
-    params = {
-        'part': 'snippet,topicDetails',
-        'id': channel.channel_id,
-    }
-    headers = {"Authorization": f"Bearer {token}"}
-
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        response.raise_for_status()
-        data = response.json()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"YouTube API error for channel {channel_id}: {e}")
-        # Spróbuj ponownie za 60 sekund
-        raise self.retry(exc=e, countdown=60)
-
-    items = data.get('items', [])
-    if not items:
-        logger.warning(f"No data returned for channel {channel_id}")
-        return
-
-    snippet = items[0].get("snippet", {})
-    channel_name = snippet.get("title", "Unknown")
-    channel_videos = fetch_channel_recent_videos(channel.channel_id, youtube_account_id)
-    result = compute_music_score(data, channel_videos)
-
-    if result.get("is_music"):
-        logger.info(
-            f"[MUSIC] {channel_name} (score={result['total_score']}, "
-            f"topics={result['score_topics']}, text={result['score_text']}, "
-            f"videos={result['score_videos']})"
-        )
-
-    channel.is_music = result.get("is_music", False)
-    channel.confidence_score = result["total_score"]
-    channel.last_classified_at = timezone.now()
-    channel.save(update_fields=["is_music", "confidence_score", "last_classified_at"])
