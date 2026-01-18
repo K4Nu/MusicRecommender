@@ -4,7 +4,7 @@ from datetime import timedelta, datetime
 import requests
 from users.models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory, Album, \
     SpotifyPlaylist, SpotifyPlaylistTrack, Genre
-from utils.locks import acquire_playlist_lock, release_playlist_lock
+from utils.locks import ResourceLock,ResourceLockedException
 from django.core.cache import cache
 from requests.exceptions import HTTPError
 from users.youtube_classifiers import compute_music_score
@@ -28,52 +28,58 @@ def parse_spotify_release_date(value: str):
 
     return None
 
+
 @shared_task
 def fetch_spotify_initial_data(user_id):
     """
     Fetch initial data from Spotify
     """
     try:
-        spotify_account = SpotifyAccount.objects.get(user_id=user_id)
-    except SpotifyAccount.DoesNotExist:
-        print(f"SpotifyAccount not found for user {user_id}")
+        with ResourceLock('spotify_initial_sync', user_id, timeout=1800):
+            try:
+                spotify_account = SpotifyAccount.objects.get(user_id=user_id)
+            except SpotifyAccount.DoesNotExist:
+                logger.error(f"SpotifyAccount not found for user {user_id}")
+                return
+
+            spotify = ensure_spotify_token(spotify_account.user)
+            if not spotify:
+                return
+
+            access_token = spotify.access_token
+            if not access_token:
+                logger.error(f"Failed to get valid token for user {user_id}")
+                return
+
+            headers = {"Authorization": f"Bearer {access_token}"}
+
+            # 1. Top Artists (short, medium, long term)
+            fetch_top_items(headers, "artists", "short_term", user_id)
+            fetch_top_items(headers, "artists", "medium_term", user_id)
+            fetch_top_items(headers, "artists", "long_term", user_id)
+
+            # 2. Top Tracks (short, medium, long term)
+            fetch_top_items(headers, "tracks", "short_term", user_id)
+            fetch_top_items(headers, "tracks", "medium_term", user_id)
+            fetch_top_items(headers, "tracks", "long_term", user_id)
+
+            # 3. Recently Played
+            fetch_recently_played(headers, user_id)
+
+            # 4. Saved Tracks
+            fetch_saved_tracks(headers, user_id)
+
+            # 5. Playlists
+            sync_user_playlists.delay(user_id)
+
+            spotify_account.last_synced_at = timezone.now()
+            spotify_account.save(update_fields=["last_synced_at"])
+
+            logger.info(f"✅ Initial Spotify data fetched for user {user_id}")
+
+    except ResourceLockedException:
+        logger.info(f"User {user_id} initial sync already in progress, skipping")
         return
-
-    spotify=ensure_spotify_token(spotify_account.user)
-    if not spotify:
-        return
-    access_token = spotify.access_token
-    if not access_token:
-        print(f"Failed to get valid token for user {user_id}")
-        return
-
-    headers = {"Authorization": f"Bearer {access_token}"}
-
-    # 1. Top Artists (short, medium, long term)
-    fetch_top_items(headers, "artists", "short_term", user_id)
-    fetch_top_items(headers, "artists", "medium_term", user_id)
-    fetch_top_items(headers, "artists", "long_term", user_id)
-
-    # 2. Top Tracks (short, medium, long term)
-    fetch_top_items(headers, "tracks", "short_term", user_id)
-    fetch_top_items(headers, "tracks", "medium_term", user_id)
-    fetch_top_items(headers, "tracks", "long_term", user_id)
-
-    # 3. Recently Played
-    fetch_recently_played(headers, user_id)
-
-    # 4. Saved Tracks
-    fetch_saved_tracks(headers, user_id)
-
-    # 5. Playlists
-    sync_user_playlists.delay(user_id)
-
-    # Zaktualizuj last_synced_at
-    spotify_account.last_synced_at = timezone.now()
-    spotify_account.save()
-
-    print(f"✅ Initial Spotify data fetched for user {user_id}")
-
 
 def fetch_top_items(headers, item_type, time_range, user_id):
     """
@@ -88,7 +94,7 @@ def fetch_top_items(headers, item_type, time_range, user_id):
         data = response.json()
 
         items = data.get('items', [])
-        print(f"Fetched {len(items)} top {item_type} ({time_range}) for user {user_id}")
+        logger.info(f"Fetched {len(items)} top {item_type} ({time_range}) for user {user_id}")
 
         user = User.objects.get(id=user_id)  # ✅ .get() zamiast .filter()
 
@@ -170,10 +176,13 @@ def fetch_top_items(headers, item_type, time_range, user_id):
 
         if top_items_to_create:
             UserTopItem.objects.bulk_create(top_items_to_create)
-            print(f"✅ Bulk created {len(top_items_to_create)} items")
+            logger.info(f"✅ Bulk created {len(top_items_to_create)} items")
 
     except requests.exceptions.RequestException as e:
-        print(f"Failed to fetch top {item_type} ({time_range}): {e}")
+        logger.error(
+            f"Failed to fetch top {item_type} ({time_range}) for user {user_id}",
+            exc_info=e
+        )
 
 
 def fetch_recently_played(headers, user_id):
@@ -219,7 +228,7 @@ def fetch_recently_played(headers, user_id):
             new_items.append(item)
 
         if not new_items:
-            print("No new items found")
+            logger.debug("No new items found")
             return
 
         tracks_data=[item.get('track') for item in new_items]
@@ -243,7 +252,7 @@ def fetch_recently_played(headers, user_id):
             ListeningHistory.objects.bulk_create(history_events)
 
     except requests.exceptions.RequestException as e:
-        print(f"Failed to fetch recently played: {e}")
+        logger.info('f"Failed to fetch recently played: {e}"')
 
 
 def fetch_saved_tracks(headers, user_id):
@@ -265,17 +274,22 @@ def fetch_saved_tracks(headers, user_id):
 
             url = data.get('next')  # None finish the loop
 
-        print(f"Fetched saved tracks for user {user_id}")
+        logger.info(f"Fetched saved tracks for user {user_id}")
 
     except requests.exceptions.RequestException as e:
-        print(f"Failed to fetch saved tracks: {e}")
+        logger.error("Failed to fetch saved tracks", exc_info=e)
 
 @shared_task
 def sync_user_playlists(user_id):
-    changed_playlists = fetch_spotify_playlists(user_id)
+    try:
+        with ResourceLock("playlists_sync",user_id, timeout=900):
+            changed_playlists = fetch_spotify_playlists(user_id)
 
-    for playlist_id in changed_playlists:
-        fetch_playlist_tracks.delay(playlist_id)
+            for playlist_id in changed_playlists:
+                fetch_playlist_tracks.delay(playlist_id)
+    except ResourceLockedException:
+        logger.info(f"User {user_id} playlists sync already in progress, skipping")
+        return
 
 def fetch_spotify_playlists(user_id):
 
@@ -376,114 +390,111 @@ def fetch_spotify_playlists(user_id):
         )
     return changed_playlists
 
+
 @shared_task(bind=True, max_retries=3)
 def fetch_playlist_tracks(self, playlist_id):
-
-    # 🔒 LOCK — jeśli ktoś już syncuje tę playlistę, wychodzimy
-    if not acquire_playlist_lock(playlist_id):
-        return
-
     try:
-        try:
-            playlist = SpotifyPlaylist.objects.get(id=playlist_id)
-        except SpotifyPlaylist.DoesNotExist:
-            return
-
-        # 🔑 SNAPSHOT GUARD
-        if playlist.tracks_snapshot_id == playlist.snapshot_id:
-            return
-
-        spotify = ensure_spotify_token(playlist.user)
-        if not spotify:
-            return
-
-        headers = {
-            "Authorization": f"Bearer {spotify.access_token}"
-        }
-
-        # 🔑 ETag tylko dla pierwszej strony
-        if playlist.tracks_etag:
-            headers["If-None-Match"] = playlist.tracks_etag
-
-        url = f"https://api.spotify.com/v1/playlists/{playlist.spotify_id}/tracks"
-
-        relations = []
-        position = 0
-        first_page = True
-
-        while url:
+        with ResourceLock('playlist_sync', playlist_id, timeout=600):
             try:
-                r = requests.get(
-                    url,
-                    headers=headers,
-                    params={"limit": 100},
-                    timeout=15
-                )
-            except requests.exceptions.RequestException as e:
-                raise self.retry(exc=e, countdown=30)
-
-            # 🔥 PLAYLIST SIĘ NIE ZMIENIŁA
-            if r.status_code == 304:
-                playlist.tracks_snapshot_id = playlist.snapshot_id
-                playlist.last_synced_at = timezone.now()
-                playlist.save(update_fields=[
-                    "tracks_snapshot_id",
-                    "last_synced_at",
-                ])
+                playlist = SpotifyPlaylist.objects.get(id=playlist_id)
+            except SpotifyPlaylist.DoesNotExist:
                 return
 
-            r.raise_for_status()
-            data = r.json()
+            # 🔑 SNAPSHOT GUARD
+            if playlist.tracks_snapshot_id == playlist.snapshot_id:
+                return
 
-            # 🔑 tylko po pierwszej stronie
-            if first_page:
-                playlist.tracks_etag = r.headers.get("ETag")
-                playlist.save(update_fields=["tracks_etag"])
+            spotify = ensure_spotify_token(playlist.user)
+            if not spotify:
+                return
 
-                # ❗ dopiero TERAZ kasujemy stare tracki
-                SpotifyPlaylistTrack.objects.filter(
-                    playlist=playlist
-                ).delete()
+            headers = {
+                "Authorization": f"Bearer {spotify.access_token}"
+            }
 
-                headers.pop("If-None-Match", None)
-                first_page = False
+            # 🔑 ETag tylko dla pierwszej strony
+            if playlist.tracks_etag:
+                headers["If-None-Match"] = playlist.tracks_etag
 
-            tracks_data = []
-            for item in data.get("items", []):
-                track_data = item.get("track")
-                if track_data and track_data.get("id"):
-                    tracks_data.append(track_data)
+            url = f"https://api.spotify.com/v1/playlists/{playlist.spotify_id}/tracks"
 
-            tracks_cache = save_tracks_bulk(tracks_data)
+            relations = []
+            position = 0
+            first_page = True
 
-            for item in data.get("items", []):
-                track = tracks_cache.get(item.get("track", {}).get("id"))
-                if track:
-                    relations.append(
-                        SpotifyPlaylistTrack(
-                            playlist=playlist,
-                            track=track,
-                            position=position,
-                            added_at=item.get("added_at"),
-                        )
+            while url:
+                try:
+                    r = requests.get(
+                        url,
+                        headers=headers,
+                        params={"limit": 100},
+                        timeout=15
                     )
-                    position += 1
+                except requests.exceptions.RequestException as e:
+                    raise self.retry(exc=e, countdown=30)
 
-            url = data.get("next")
+                # 🔥 PLAYLIST SIĘ NIE ZMIENIŁA
+                if r.status_code == 304:
+                    playlist.tracks_snapshot_id = playlist.snapshot_id
+                    playlist.last_synced_at = timezone.now()
+                    playlist.save(update_fields=[
+                        "tracks_snapshot_id",
+                        "last_synced_at",
+                    ])
+                    return
 
-        if relations:
-            SpotifyPlaylistTrack.objects.bulk_create(relations)
+                r.raise_for_status()
+                data = r.json()
 
-        playlist.tracks_snapshot_id = playlist.snapshot_id
-        playlist.last_synced_at = timezone.now()
-        playlist.save(update_fields=[
-            "tracks_snapshot_id",
-            "last_synced_at",
-        ])
+                # 🔑 tylko po pierwszej stronie
+                if first_page:
+                    playlist.tracks_etag = r.headers.get("ETag")
+                    playlist.save(update_fields=["tracks_etag"])
 
-    finally:
-        # 🔓 ZAWSZE zdejmujemy lock
-        release_playlist_lock(playlist_id)
+                    # ❗ dopiero TERAZ kasujemy stare tracki
+                    SpotifyPlaylistTrack.objects.filter(
+                        playlist=playlist
+                    ).delete()
+
+                    headers.pop("If-None-Match", None)
+                    first_page = False
+
+                tracks_data = []
+                for item in data.get("items", []):
+                    track_data = item.get("track")
+                    if track_data and track_data.get("id"):
+                        tracks_data.append(track_data)
+
+                tracks_cache = save_tracks_bulk(tracks_data)
+
+                for item in data.get("items", []):
+                    track = tracks_cache.get(item.get("track", {}).get("id"))
+                    if track:
+                        relations.append(
+                            SpotifyPlaylistTrack(
+                                playlist=playlist,
+                                track=track,
+                                position=position,
+                                added_at=item.get("added_at"),
+                            )
+                        )
+                        position += 1
+
+                url = data.get("next")
+
+            if relations:
+                SpotifyPlaylistTrack.objects.bulk_create(relations)
+
+            playlist.tracks_snapshot_id = playlist.snapshot_id
+            playlist.last_synced_at = timezone.now()
+            playlist.save(update_fields=[
+                "tracks_snapshot_id",
+                "last_synced_at",
+            ])
+
+    except ResourceLockedException:
+        logger.warning(f"Playlist {playlist_id} sync already in progress, skipping")
+        return
 
 
 
@@ -1095,7 +1106,7 @@ def refresh_spotify_user_data(spotify_account_id, time_term):
         access_token = spotify_account.access_token
 
         if not access_token:
-            print(f"Failed to get token for SpotifyAccount {spotify_account_id}")
+            logger.info(f"Failed to get token for SpotifyAccount {spotify_account_id}")
             return
 
         headers = {"Authorization": f"Bearer {access_token}"}
@@ -1107,7 +1118,7 @@ def refresh_spotify_user_data(spotify_account_id, time_term):
         spotify_account.save()
 
     except SpotifyAccount.DoesNotExist:
-        print(f"SpotifyAccount {spotify_account_id} does not exist")
+        logger.info(f"SpotifyAccount {spotify_account_id} does not exist")
 
 
 @shared_task
@@ -1124,12 +1135,11 @@ def chunk_audio_features(data_chunk):
     spotify_user = SpotifyAccount.objects.first()
 
     if not spotify_user:
-        print("No Spotify account available")
-        return
+        logger.info(f"Failed to get token for SpotifyAccount {data_chunk}")
     spotify=ensure_spotify_token(spotify_user.user)
     access_token = spotify.access_token
     if not access_token:
-        print("Failed to get token")
+        logger.info("Failed to fetch token for SpotifyAccount")
         return
 
     headers = {"Authorization": f"Bearer {access_token}"}
@@ -1139,7 +1149,7 @@ def chunk_audio_features(data_chunk):
         response.raise_for_status()
         data = response.json()
     except Exception as e:
-        print(f"API request failed: {e}")
+        logger.error("Failed to fetch audio features", exc_info=e)
         return
 
     audio_features = data.get('audio_features', [])
@@ -1173,118 +1183,10 @@ def chunk_audio_features(data_chunk):
             features_to_create.append(audio_feature)
 
         except Track.DoesNotExist:
-            print(f"Track {track_spotify_id} not found in DB")
+            logger.info(f"Track {track_spotify_id} does not exist")
             continue
 
     if features_to_create:
         AudioFeatures.objects.bulk_create(features_to_create, ignore_conflicts=True)
-        print(f"Created {len(features_to_create)} audio features")
+        logger.info(f"Created {len(features_to_create)} audio features")
 
-@shared_task
-def youtube_test_fetch(access_token, page_token=None):
-
-    url='https://www.googleapis.com/youtube/v3/subscriptions'
-    headers = {"Authorization": f"Bearer {access_token}"}
-    params = {
-        'part': 'snippet',
-        'mine': 'true',
-        "maxResults": 50,
-    }
-
-    if page_token:
-        params['pageToken'] = page_token
-
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        data=response.json()
-    except requests.exceptions.RequestException as e:
-        print(e)
-        return
-
-    items=data.get('items', [])
-    for item in items:
-        current=item['snippet']['resourceId']['channelId']
-        check_youtube_channel_category.delay(access_token,current)
-
-
-    next_page_token = data.get('nextPageToken')
-    if next_page_token:
-        youtube_test_fetch.delay(access_token,next_page_token)
-
-@shared_task(bind=True,max_retries=3)
-def check_youtube_channel_category(self,access_token,channel_id,user_id):
-    cache_key = f"music_check:{channel_id}"
-    cached_result=cache.get(cache_key)
-    if cached_result:
-        return cached_result
-    url='https://www.googleapis.com/youtube/v3/channels'
-    headers = {"Authorization": f"Bearer {access_token}"}
-    params = {
-        'part': 'snippet,topicDetails',
-        'id': channel_id,
-
-    }
-    try:
-        response=requests.get(url,headers=headers,params=params)
-        response.raise_for_status()
-        data=response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"[check_youtube_channel_category] error: {e}")
-        return
-    except HTTPError as e:
-        if e.response.status_code == 429:  # Rate limit
-            raise self.retry(exc=e, countdown=60)
-        return
-
-    items=data.get('items', [])
-    if not items:
-        return
-
-    snippet=items[0].get("snippet",{})
-    channel_name=snippet.get("title","Unknown")
-    channel_videos=get_recent_video_categories(channel_id,access_token)
-
-    result = compute_music_score(data, recent_video_categories=channel_videos)
-
-    if result["is_music"]:
-        print(
-            f"[MUSIC] {channel_name} "
-            f"(score={result['total_score']}, "
-            f"topics={result['score_topics']}, "
-            f"text={result['score_text']}, "
-            f"videos={result['score_videos']})"
-        )
-        # TODO: database save / user connect
-    return
-
-
-def get_recent_video_categories(channel_id,access_token):
-    search_url = "https://www.googleapis.com/youtube/v3/search"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    params = {
-        "part": "snippet",
-        "channelId": channel_id,
-        "type": "video",
-        "order": "date",
-        "maxResults": 20,
-    }
-    response=requests.get(search_url,headers=headers,params=params)
-    response.raise_for_status()
-    data=response.json()
-    video_ids = [item["id"]["videoId"] for item in data.get("items", [])]
-    if not video_ids:
-        return []
-    if len(video_ids) < 5:
-        return []
-    videos_url="https://www.googleapis.com/youtube/v3/videos"
-    params={"part":"snippet", "id":",".join(video_ids)}
-    r=requests.get(videos_url,headers=headers,params=params)
-    r.raise_for_status()
-    data=r.json()
-
-    return [
-        int(item["snippet"]["categoryId"])
-        for item in data.get("items", [])
-        if "snippet" in item
-    ]
