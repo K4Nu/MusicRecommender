@@ -112,6 +112,7 @@ class SpotifyAccount(models.Model):
     expires_at = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
     playlists_etag = models.CharField(max_length=128, null=True, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return self.user.email
