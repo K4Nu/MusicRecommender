@@ -400,8 +400,6 @@ class SpotifyPlaylistTrack(models.Model):
 class YoutubeAccount(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
 
-    youtube_id = models.CharField(max_length=255, unique=True)
-
     access_token = models.CharField(max_length=512)
     refresh_token = models.CharField(max_length=512)
     expires_at = models.DateTimeField()
@@ -507,4 +505,4 @@ class UserYoutubeChannel(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.user.username} -> {self.channel.title}"
+        return f"{self.user.email} -> {self.channel.title}"

@@ -260,17 +260,7 @@ class YoutubeConnect(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Pobierz YouTube channel ID
-        try:
-            print("📤 Fetching YouTube channel ID...")
-            youtube_id = self.get_youtube_channel_id(access_token)
-            print(f"✅ YouTube ID: {youtube_id}")
-        except Exception as e:
-            print(f"❌ Failed to fetch YouTube channel: {str(e)}")
-            return Response(
-                {"detail": f"Failed to fetch YouTube channel: {str(e)}"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+
 
         # Zapisz konto
         expires_at = timezone.now() + timedelta(seconds=expires_in)
@@ -279,14 +269,13 @@ class YoutubeConnect(APIView):
         youtube_account, created = YoutubeAccount.objects.update_or_create(
             user=request.user,
             defaults={
-                'youtube_id': youtube_id,
                 'access_token': access_token,
                 'refresh_token': refresh_token,
                 'expires_at': expires_at,
             }
         )
-
-        sync_youtube_user(youtube_account.id)
+        if created:
+            sync_youtube_user.delay(youtube_account.id)
 
         action = "created" if created else "updated"
         print(f"✅ YouTube account {action} for user {request.user.email}")
@@ -295,32 +284,10 @@ class YoutubeConnect(APIView):
         return Response(
             {
                 "message": "Successfully connected YouTube account",
-                "youtube_id": youtube_id,
                 "action": action
             },
             status=status.HTTP_200_OK,
         )
-
-    def get_youtube_channel_id(self, access_token):
-        """
-        Gets user YT channel ID
-        """
-        url = "https://www.googleapis.com/youtube/v3/channels"
-        headers = {"Authorization": f"Bearer {access_token}"}
-        params = {
-            "part": "id,snippet",
-            "mine": "true"
-        }
-
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-
-        items = data.get("items", [])
-        if not items:
-            raise ValueError("No YouTube channel found for this account")
-
-        return items[0]["id"]
 
 class RecommendationsView(APIView):
     permission_classes = [permissions.IsAuthenticated]

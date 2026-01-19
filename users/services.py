@@ -39,8 +39,6 @@ def refresh_youtube_account(youtube):
         data={
             "grant_type": "refresh_token",
             "refresh_token": youtube.refresh_token,
-            "client_id": os.getenv("YOUTUBE_CLIENT_ID"),
-            "client_secret": os.getenv("YOUTUBE_CLIENT_SECRET"),
         },
         timeout=10
     )
