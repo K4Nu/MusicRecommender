@@ -6,7 +6,7 @@ from celery import shared_task
 from users.youtube_classifiers import compute_music_score
 from users.services import ensure_youtube_token
 from utils.locks import ResourceLock, ResourceLockedException
-
+import os
 logger = logging.getLogger(__name__)
 
 
@@ -24,6 +24,7 @@ def sync_youtube_user(youtube_account_id):
 
 
 def fetch_user_channels(youtube_account_id):
+
     """
     Sync user YouTube subscriptions:
     - fetch user subscribed channels
@@ -38,12 +39,21 @@ def fetch_user_channels(youtube_account_id):
 
     token = ensure_youtube_token(account.user)
     url = "https://www.googleapis.com/youtube/v3/subscriptions"
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token.access_token}"}
     params = {
         "part": "snippet",
         "mine": "true",
         "maxResults": 50,
+        "key": os.environ["YOUTUBE_API_KEY"],
     }
+
+    debug = requests.get(
+        "https://www.googleapis.com/oauth2/v3/tokeninfo",
+        params={"access_token": token.access_token},
+        timeout=5
+    )
+
+    logger.error(f"TOKENINFO: {debug.json()}")
 
     all_created_channels = []
 
@@ -54,6 +64,8 @@ def fetch_user_channels(youtube_account_id):
             data = response.json()
         except requests.exceptions.RequestException as e:
             logger.error(f"YouTube subscriptions sync failed: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response body: {e.response.text}")  # ← Dodaj
             return all_created_channels
 
         items = data.get("items", [])
@@ -148,6 +160,7 @@ def fetch_user_channels(youtube_account_id):
             params["pageToken"] = next_token
             url = "https://www.googleapis.com/youtube/v3/subscriptions"
         else:
+            params.pop("pageToken", None)
             url = None
 
     account.last_synced_at = timezone.now()
@@ -164,17 +177,17 @@ def fetch_channel_recent_videos(channel_id, youtube_account_id):
 
     token = ensure_youtube_token(account.user)
     search_url = "https://www.googleapis.com/youtube/v3/search"
-    headers = {"Authorization": f"Bearer {token}"}
     params = {
         "part": "snippet",
         "channelId": channel_id,
         "type": "video",
         "order": "date",
         "maxResults": 20,
+        "key": os.environ["YOUTUBE_API_KEY"],
     }
 
     try:
-        response = requests.get(search_url, headers=headers, params=params, timeout=15)
+        response = requests.get(search_url, params=params, timeout=15)
         response.raise_for_status()
         data = response.json()
     except requests.exceptions.RequestException as e:
@@ -186,10 +199,12 @@ def fetch_channel_recent_videos(channel_id, youtube_account_id):
         return []
 
     videos_url = "https://www.googleapis.com/youtube/v3/videos"
-    params = {"part": "snippet", "id": ",".join(video_ids)}
+    params = {"part": "snippet",
+              "id":",".join(video_ids),
+              "key": os.environ["YOUTUBE_API_KEY"],}
 
     try:
-        r = requests.get(videos_url, headers=headers, params=params, timeout=15)
+        r = requests.get(videos_url, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
     except requests.exceptions.RequestException as e:
@@ -229,11 +244,12 @@ def classify_channel(self, channel_id, youtube_account_id):
             params = {
                 'part': 'snippet,topicDetails',
                 'id': channel.channel_id,
+                'key':os.environ["YOUTUBE_API_KEY"],
             }
-            headers = {"Authorization": f"Bearer {token}"}
+
 
             try:
-                response = requests.get(url, headers=headers, params=params, timeout=15)
+                response = requests.get(url, params=params, timeout=15)
                 response.raise_for_status()
                 data = response.json()
             except requests.exceptions.RequestException as e:
