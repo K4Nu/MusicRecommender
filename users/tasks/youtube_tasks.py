@@ -2,8 +2,8 @@ import requests
 from django.utils import timezone
 from users.models import YoutubeChannel, UserYoutubeChannel, YoutubeAccount
 import logging
-from celery import shared_task
-from users.youtube_classifiers import compute_music_score
+from celery import shared_task, chord
+from users.youtube_classifiers import compute_preliminary_score,compute_final_score
 from users.services import ensure_youtube_token
 from utils.locks import ResourceLock, ResourceLockedException
 import os
@@ -46,14 +46,6 @@ def fetch_user_channels(youtube_account_id):
         "maxResults": 50,
         "key": os.environ["YOUTUBE_API_KEY"],
     }
-
-    debug = requests.get(
-        "https://www.googleapis.com/oauth2/v3/tokeninfo",
-        params={"access_token": token.access_token},
-        timeout=5
-    )
-
-    logger.error(f"TOKENINFO: {debug.json()}")
 
     all_created_channels = []
 
@@ -176,26 +168,25 @@ def fetch_channel_recent_videos(channel_id, youtube_account_id):
         return []
 
     token = ensure_youtube_token(account.user)
-    search_url = "https://www.googleapis.com/youtube/v3/search"
+    playlist_url = "https://www.googleapis.com/youtube/v3/playlistItems"
+    uploads_playlist_id = "UU" + channel_id[2:]
     params = {
-        "part": "snippet",
-        "channelId": channel_id,
-        "type": "video",
-        "order": "date",
-        "maxResults": 20,
+        "part": "contentDetails",
+        "playlistId": uploads_playlist_id,
+        "maxResults": 10,
         "key": os.environ["YOUTUBE_API_KEY"],
     }
 
     try:
-        response = requests.get(search_url, params=params, timeout=15)
+        response = requests.get(playlist_url, params=params, timeout=15)
         response.raise_for_status()
         data = response.json()
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to fetch videos for channel {channel_id}: {e}")
         return []
 
-    video_ids = [item["id"]["videoId"] for item in data.get("items", [])]
-    if not video_ids or len(video_ids) < 5:
+    video_ids = [item["contentDetails"]["videoId"] for item in data.get("items", [])]
+    if not video_ids:
         return []
 
     videos_url = "https://www.googleapis.com/youtube/v3/videos"
@@ -217,6 +208,9 @@ def fetch_channel_recent_videos(channel_id, youtube_account_id):
         if "snippet" in item and "categoryId" in item["snippet"]
     ]
 
+@shared_task
+def youtube_sync_finished(results, user_id):
+    logger.info(f"✅ FULL Youtube sync finished for user {user_id}")
 
 @shared_task
 def classify_channels(channel_ids, youtube_account_id):
@@ -224,8 +218,11 @@ def classify_channels(channel_ids, youtube_account_id):
     if not channel_ids:
         return
 
-    for channel_id in channel_ids:
-        classify_channel.delay(channel_id, youtube_account_id)
+    tasks = [
+        classify_channel.s(ch_id, youtube_account_id)
+        for ch_id in channel_ids
+    ]
+    chord(tasks)(youtube_sync_finished.s(youtube_account_id))
 
 
 @shared_task(bind=True, max_retries=3)
@@ -247,7 +244,6 @@ def classify_channel(self, channel_id, youtube_account_id):
                 'key':os.environ["YOUTUBE_API_KEY"],
             }
 
-
             try:
                 response = requests.get(url, params=params, timeout=15)
                 response.raise_for_status()
@@ -263,8 +259,13 @@ def classify_channel(self, channel_id, youtube_account_id):
 
             snippet = items[0].get("snippet", {})
             channel_name = snippet.get("title", "Unknown")
-            channel_videos = fetch_channel_recent_videos(channel.channel_id, youtube_account_id)
-            result = compute_music_score(data, channel_videos)
+            prelim_result=compute_preliminary_score(data)
+            if prelim_result['is_music']:
+                channel_videos = fetch_channel_recent_videos(channel.channel_id, youtube_account_id)
+                final_result = compute_final_score(channel_videos,prelim_result["total_score"])
+                result={**prelim_result,**final_result}
+            else:
+                result={**prelim_result,"score_videos":0.0}
 
             if result.get("is_music"):
                 logger.info(
@@ -281,3 +282,4 @@ def classify_channel(self, channel_id, youtube_account_id):
     except ResourceLockedException:
         logger.info(f"Channel {channel_id} is already being classified, skipping")
         return
+
