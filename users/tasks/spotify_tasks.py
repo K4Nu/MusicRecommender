@@ -5,9 +5,6 @@ import requests
 from users.models import UserTopItem, Artist, Track, User, SpotifyAccount, AudioFeatures, ListeningHistory, Album, \
     SpotifyPlaylist, SpotifyPlaylistTrack, Genre
 from utils.locks import ResourceLock,ResourceLockedException
-from django.core.cache import cache
-from requests.exceptions import HTTPError
-from users.youtube_classifiers import compute_music_score
 from datetime import date
 import logging
 from users.services import ensure_spotify_token
