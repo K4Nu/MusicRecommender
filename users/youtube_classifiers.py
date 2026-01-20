@@ -42,24 +42,18 @@ MUSIC_KEYWORDS_WEAK = [
     "soundtrack", "ost", "cover", "remix", "instrumental", "session",
 ]
 
+
 def tokenize(text: str) -> set[str]:
-    # Zamień znaki interpunkcyjne na spacje zamiast je usuwać
     translator = str.maketrans(string.punctuation, ' ' * len(string.punctuation))
     clean = text.translate(translator)
     tokens = clean.lower().split()
-    # Opcjonalnie: dodaj też bigramy dla "official music" itp.
     return set(tokens)
 
-def compute_preliminary_score(
-    channel_data: dict,
-) -> dict:
+
+def compute_preliminary_score(channel_data: dict) -> dict:
     """
-    channel_data – JSON z YouTube /channels?part=snippet,topicDetails
-    recent_video_categories – lista videoCategoryId (int) dla ostatnich filmów, np. [10, 22, 10, ...]
-    Returns:
-      - total_score
-      - score_topics, score_text, score_videos
-      - is_music (bool)
+    Punktacja na podstawie topics i metadanych kanału.
+    Returns: dict z total_score, score_topics, score_text, is_music
     """
     score_topics = 0.0
     score_text = 0.0
@@ -70,7 +64,6 @@ def compute_preliminary_score(
             "total_score": 0.0,
             "score_topics": 0.0,
             "score_text": 0.0,
-            "score_videos": 0.0,
             "is_music": False,
         }
 
@@ -97,18 +90,17 @@ def compute_preliminary_score(
 
     score_topics = min(score_topics, 3.0)
 
-    # --- 2) Scoring title / desscription ---
+    # --- 2) Scoring title / description ---
     title = (snippet.get("title") or "").lower()
     description = (snippet.get("description") or "").lower()
     text = f"{title}\n{description}"
-    tokens = tokenize(text)
 
     for kw in MUSIC_KEYWORDS_STRONG:
-        if kw in tokens:
+        if kw in text:
             score_text += 1.0
 
     for kw in MUSIC_KEYWORDS_WEAK:
-        if kw in tokens:
+        if kw in text:  # ← ZMIANA
             score_text += 0.5
 
     score_text = min(score_text, 2.0)
@@ -123,10 +115,16 @@ def compute_preliminary_score(
         "is_music": is_music,
     }
 
+
 def compute_final_score(recent_video_categories: Optional[List[int]], curr_score: float) -> dict:
-    total = len(recent_video_categories)
-    score_videos=0.0
-    if total > 0:
+    """
+    Dodaje punktację z kategorii ostatnich filmów.
+    Returns: dict z total_score, score_videos, is_music
+    """
+    score_videos = 0.0
+
+    if recent_video_categories:
+        total = len(recent_video_categories)
         music_count = sum(1 for cat in recent_video_categories if cat == 10)
         ratio = music_count / total
 
@@ -134,12 +132,12 @@ def compute_final_score(recent_video_categories: Optional[List[int]], curr_score
             score_videos = 2.0
         elif ratio >= 0.4:
             score_videos = 1.0
-        else:
-            score_videos = 0.0
 
-    total_score=curr_score+score_videos
-    is_music = total_score >= 5.0
+    total_score = curr_score + score_videos
+    is_music = total_score >= 4.5
+
     return {
         "total_score": total_score,
+        "score_videos": score_videos,
         "is_music": is_music,
     }
