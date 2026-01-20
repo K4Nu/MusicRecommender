@@ -1,5 +1,5 @@
 from typing import Optional, List
-
+import string
 MUSIC_TOPICS_STRONG = {
     "music", "pop_music", "rock_music", "hip_hop_music", "electronic_music",
     "dance_music", "classical_music", "jazz", "blues", "country_music",
@@ -42,10 +42,16 @@ MUSIC_KEYWORDS_WEAK = [
     "soundtrack", "ost", "cover", "remix", "instrumental", "session",
 ]
 
+def tokenize(text: str) -> set[str]:
+    # Zamień znaki interpunkcyjne na spacje zamiast je usuwać
+    translator = str.maketrans(string.punctuation, ' ' * len(string.punctuation))
+    clean = text.translate(translator)
+    tokens = clean.lower().split()
+    # Opcjonalnie: dodaj też bigramy dla "official music" itp.
+    return set(tokens)
 
-def compute_music_score(
+def compute_preliminary_score(
     channel_data: dict,
-    recent_video_categories: Optional[List[int]] = None,
 ) -> dict:
     """
     channel_data – JSON z YouTube /channels?part=snippet,topicDetails
@@ -57,7 +63,6 @@ def compute_music_score(
     """
     score_topics = 0.0
     score_text = 0.0
-    score_videos = 0.0
 
     items = channel_data.get("items") or []
     if not items:
@@ -96,38 +101,45 @@ def compute_music_score(
     title = (snippet.get("title") or "").lower()
     description = (snippet.get("description") or "").lower()
     text = f"{title}\n{description}"
+    tokens = tokenize(text)
 
     for kw in MUSIC_KEYWORDS_STRONG:
-        if kw in text:
+        if kw in tokens:
             score_text += 1.0
 
     for kw in MUSIC_KEYWORDS_WEAK:
-        if kw in text:
+        if kw in tokens:
             score_text += 0.5
 
     score_text = min(score_text, 2.0)
 
-    # --- 3) Scoring po ostatnich filmach (videoCategoryId) ---
-    if recent_video_categories:
-        total = len(recent_video_categories)
-        if total > 0:
-            music_count = sum(1 for cat in recent_video_categories if cat == 10)
-            ratio = music_count / total
-
-            if ratio >= 0.7:
-                score_videos = 2.0
-            elif ratio >= 0.4:
-                score_videos = 1.0
-            else:
-                score_videos = 0.0
-
-    total_score = score_topics + score_text + score_videos
+    total_score = score_topics + score_text
     is_music = total_score >= 3.0
 
     return {
         "total_score": total_score,
         "score_topics": score_topics,
         "score_text": score_text,
-        "score_videos": score_videos,
+        "is_music": is_music,
+    }
+
+def compute_final_score(recent_video_categories: Optional[List[int]], curr_score: float) -> dict:
+    total = len(recent_video_categories)
+    score_videos=0.0
+    if total > 0:
+        music_count = sum(1 for cat in recent_video_categories if cat == 10)
+        ratio = music_count / total
+
+        if ratio >= 0.7:
+            score_videos = 2.0
+        elif ratio >= 0.4:
+            score_videos = 1.0
+        else:
+            score_videos = 0.0
+
+    total_score=curr_score+score_videos
+    is_music = total_score >= 5.0
+    return {
+        "total_score": total_score,
         "is_music": is_music,
     }
