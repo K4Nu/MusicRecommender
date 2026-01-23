@@ -430,6 +430,19 @@ class ArtistTag(models.Model):
             models.Index(fields=["artist", '-weight']),
         ]
 
+class TrackTag(models.Model):
+    track = models.ForeignKey(Track, on_delete=models.CASCADE, related_name='track_tags')
+    tag = models.ForeignKey(Tag, on_delete=models.CASCADE, related_name='tagged_tracks')
+    weight = models.FloatField(validators=[MinValueValidator(0.0), MaxValueValidator(1.0)])
+    source = models.CharField(max_length=20, default="lastfm")
+
+    class Meta:
+        unique_together = ("track", "tag", "source")
+        ordering = ['-weight']
+        indexes = [
+            models.Index(fields=['track', '-weight']),
+        ]
+
 class YoutubeAccount(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
 
