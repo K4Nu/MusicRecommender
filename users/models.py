@@ -419,6 +419,7 @@ class Tag(models.Model):
 
     total_usage_count = models.BigIntegerField(default=0)
 
+    is_active=models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -431,7 +432,8 @@ class Tag(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        self.normalized_name = self.normalize(self.name)
+        if not self.normalized_name:
+            self.normalized_name = self.normalize(self.name)
         super().save(*args, **kwargs)
 
     def __str__(self):
