@@ -397,6 +397,26 @@ class SpotifyPlaylistTrack(models.Model):
             models.Index(fields=["track"]),
         ]
 
+class Tag(models.Model):
+    name=models.CharField(max_length=100,unique=True,db_index=True)
+    category = models.CharField(
+        max_length=50,
+        choices=[
+            ("genre", "Genre"),
+            ("mood", "Mood"),
+            ("instrument", "Instrument"),
+            ("era", "Era"),
+            ("other", "Other"),
+        ],
+        default="other"
+    )
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        ordering = ["name"]
+
 class YoutubeAccount(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
 
