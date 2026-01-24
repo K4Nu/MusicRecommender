@@ -9,7 +9,6 @@ from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
 from django.conf import settings
-from datetime import timedelta
 from cryptography.fernet import Fernet
 import base64
 from datetime import timedelta
@@ -673,6 +672,64 @@ class TrackLastFMData(models.Model):
         return self.fetched_at < timezone.now() - timedelta(days=days)
 
 
+class BaseSimiliarityManager(models.Manager):
+    """
+        Base manager for similarity models.
+        Subclasses MUST define:
+        - from_field
+        - to_field
+        """
+    from_field:str|None = None
+    to_field:str|None = None
+
+    def _validate_fields(self):
+        if not self.from_field or not self.to_field:
+            raise NotImplementedError(
+                "from_field and to_field must be defined in subclass"
+            )
+
+    def top_similiar(self, obj, source=None,limit=20):
+        """
+                Get top N similar items for a single object.
+                """
+        self._validate_fields()
+        qs = self.filter(**{self.from_field: obj})
+        if source:
+            qs=qs.filter(source=source)
+
+        return (qs.select_related(self.to_field).order_by("-score")[:limit]
+                )
+
+    def batch_similiar(self,objects,source=None):
+        """
+        Get similarities for MANY objects.
+
+        IMPORTANT:
+        - This does NOT apply per-object limits.
+        - Limit per object MUST be applied in Python or SQL window functions.
+        """
+        self._validate_fields()
+
+        filter_key=f'{self.from_field}__in'
+        qs=self.filter(**{filter_key: objects})
+        if source:
+            qs.filter(source=source)
+
+        return (
+            qs.select_related(self.to_field,self.to_field).order_by(self.from_field,"-score")
+        )
+
+    def for_object(self, obj):
+        """
+        Get all similarity records where obj appears
+        either as 'from' or 'to'.
+        Intended for debugging / introspection.
+        """
+        self._validate_fields()
+        from_q=Q(**{self.from_field:obj})
+        to_q=Q(**{self.to_field:obj})
+        return self.filter(from_q|to_q)
+
 class YoutubeAccount(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
 
@@ -766,7 +823,7 @@ class UserYoutubeChannel(models.Model):
     subscribed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
-    # 🔔 Dodatkowe opcje
+    #  Dodatkowe opcje
     notifications_enabled = models.BooleanField(default=True)
 
     objects = UserYoutubeChannelManager()
