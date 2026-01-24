@@ -675,6 +675,9 @@ class ArtistLastFMData(models.Model):
     def needs_refresh(self, days=30):
         return self.fetched_at < timezone.now() - timedelta(days=days)
 
+    def __str__(self):
+        return self.artist.name
+
 
 class TrackLastFMData(models.Model):
     """Raw cache of Last.fm API responses"""

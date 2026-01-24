@@ -11,21 +11,23 @@ logger = logging.getLogger(__name__)
 
 URL='https://ws.audioscrobbler.com/2.0/'
 
-def sync_user_top_artists(user_id, time_range="short_term"):
-    artist_ids=(
-        UserTopItem.objects.filter(user_id=user_id,item_type="artist",time_range=time_range).values_list('artist_id',flat=True)
+def sync_user_top_artists(user_id):
+    artist_ids = set(
+        UserTopItem.objects
+        .filter(user_id=user_id, item_type="artist")
+        .values_list("artist_id", flat=True)
     )
+    print(f'ids {len(artist_ids)}')
     sync_artists_info(artist_ids)
-
 
 def sync_artists_info(items):
     for item in items:
         try:
-            with ResourceLock(f'info-{item}') as lock:
+            with ResourceLock(f'info-{item}',item,timeout=600) as lock:
                 get_artist_info.delay(item)
         except ResourceLockedException:
             logger.info(f'Sync already in run')
-            return
+            continue
 
 @shared_task(bind=True, autoretry_for=(Exception,), retry_kwargs={"max_retries": 3, "countdown": 10})
 def get_artist_info(self, artist_id):
