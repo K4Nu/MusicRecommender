@@ -14,6 +14,7 @@ from users.models import SpotifyAccount,UserTopItem,YoutubeAccount,UserYoutubeCh
 from rest_framework import generics
 from .serializers import UserTopTrackSerializer
 from drf_spectacular.utils import extend_schema
+from .tasks.lastfm_tasks import sync_user_top_artists
 
 class SpotifyConnect(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -318,4 +319,17 @@ class TestCelery(APIView):
         return Response(
             {"detail":"Tokens valid, Recommendations placeholder",
              },status=200
+        )
+
+class TestLastFM(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self,request):
+        user_id=self.request.user.id
+        sync_user_top_artists(user_id)
+
+        return Response(
+            {"detail":"Tokens valid, Recommendations placeholder",
+             "message":"GIT",
+             "status":200}
         )
