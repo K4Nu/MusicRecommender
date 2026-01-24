@@ -739,6 +739,49 @@ class TrackSimilarityManager(BaseSimiliarityManager):
     from_field = "from_track"
     to_field = "to_track"
 
+class BaseSimilarity(models.Model):
+    """
+    Abstract base model for similarity records.
+    """
+    score=models.FloatField(
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)],
+        db_index=True
+    )
+
+    source = models.CharField(
+        max_length=20,
+        choices=[
+            ("lastfm", "Last.fm"),
+            ("tags", "Tag-based"),
+            ("audio", "Audio-based"),
+            ("hybrid", "Hybrid"),
+        ],
+        default="tags"
+    )
+
+    score_breakdown=models.JSONField(
+        null=True,
+        blank=True,
+        help_text='Explainability data, e.g. {"tag_sim": 0.7, "audio_sim": 0.5}'
+    )
+
+    computed_at=models.DateTimeField(auto_now=True)
+    created_at=models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        abstract = True
+        ordering=['-score']
+
+    def __str__(self):
+        return f"{self.get_from()} → {self.get_to()} ({self.score:.2f})"
+
+    def get_from(self):
+        raise NotImplementedError
+
+    def get_to(self):
+        raise NotImplementedError
+
+
 
 class YoutubeAccount(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
