@@ -9,9 +9,9 @@ from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
 from django.conf import settings
-from datetime import timedelta
 from cryptography.fernet import Fernet
 import base64
+from datetime import timedelta
 
 
 class EncryptedTextField(models.TextField):
@@ -397,6 +397,451 @@ class SpotifyPlaylistTrack(models.Model):
             models.Index(fields=["track"]),
         ]
 
+class Tag(models.Model):
+    """Normalized, canonical tags"""
+    name = models.CharField(max_length=100)
+    normalized_name = models.CharField(max_length=100, unique=True, db_index=True)
+
+    category = models.CharField(
+        max_length=50,
+        choices=[
+            ("genre", "Genre"),
+            ("mood", "Mood"),
+            ("instrument", "Instrument"),
+            ("era", "Era"),
+            ("style", "Style"),
+            ("theme", "Theme"),
+            ("other", "Other"),
+        ],
+        default="other"
+    )
+
+    total_usage_count = models.BigIntegerField(default=0)
+
+    is_active=models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-total_usage_count', 'name']
+        indexes = [
+            models.Index(fields=['normalized_name']),
+            models.Index(fields=['category', 'normalized_name']),
+            models.Index(fields=['category', '-total_usage_count']),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self.normalized_name:
+            self.normalized_name = self.normalize(self.name)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
+    @staticmethod
+    def normalize(tag_name):
+        return tag_name.lower().strip().replace('-', ' ')
+
+class ArtistTagManager(models.Manager):
+    def top_tags(self, artist, limit=10, source="computed"):
+        return (
+            self.filter(
+                artist=artist,
+                source=source,
+                tag__is_active=True
+            )
+            .select_related("tag")
+            .order_by("-weight")[:limit]
+        )
+
+    def by_category(self, artist, category, source="computed"):
+        return (
+            self.filter(
+                artist=artist,
+                tag__category=category,
+                source=source,
+                tag__is_active=True
+            )
+            .select_related("tag")
+            .order_by("-weight")
+        )
+
+class ArtistTag(models.Model):
+    """
+    Normalized tag assignments for artists.
+    Each artist has MANY tags with weights → vector representation.
+    """
+    artist = models.ForeignKey(
+        Artist,
+        on_delete=models.CASCADE,
+        related_name="artist_tags"
+    )
+
+    tag = models.ForeignKey(
+        Tag,
+        on_delete=models.CASCADE,
+        related_name="tagged_artists"
+    )
+
+    # Final normalized weight used in similarity (0–1)
+    weight = models.FloatField(
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
+    )
+
+    source = models.CharField(
+        max_length=20,
+        choices=[
+            ("lastfm", "Last.fm raw"),
+            ("spotify", "Spotify genres"),
+            ("computed", "Computed canonical"),
+            ("manual", "Manual"),
+        ],
+        default="lastfm"
+    )
+
+    # Raw value from source (e.g. Last.fm tag count)
+    raw_count = models.IntegerField(null=True, blank=True)
+
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = ArtistTagManager()
+
+    class Meta:
+        unique_together = ("artist", "tag", "source")
+        ordering = ['-weight']
+        indexes = [
+            models.Index(fields=['artist', '-weight']),
+            models.Index(fields=['tag', '-weight']),
+            models.Index(fields=['source']),
+        ]
+
+    def __str__(self):
+        return f"{self.artist.name} · {self.tag.name} ({self.weight:.2f})"
+
+class TrackTagManager(models.Manager):
+    def top_tags(self, track, limit=10, source="computed"):
+        return (
+            self.filter(
+                track=track,
+                source=source,
+                tag__is_active=True
+            )
+            .select_related("tag")
+            .order_by("-weight")[:limit]
+        )
+
+    def by_category(self, track, category, source="computed"):
+        return (
+            self.filter(
+                track=track,
+                tag__category=category,
+                source=source,
+                tag__is_active=True
+            )
+            .select_related("tag")
+            .order_by("-weight")
+        )
+
+
+class TrackTag(models.Model):
+    track = models.ForeignKey(
+        Track,
+        on_delete=models.CASCADE,
+        related_name="track_tags"
+    )
+
+    tag = models.ForeignKey(
+        Tag,
+        on_delete=models.CASCADE,
+        related_name="tagged_tracks"
+    )
+
+    weight = models.FloatField(
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
+    )
+
+    source = models.CharField(
+        max_length=20,
+        choices=[
+            ("lastfm", "Last.fm raw"),
+            ("audio", "Audio features"),
+            ("artist", "Inherited from artist"),
+            ("computed", "Computed canonical"),
+            ("manual", "Manual"),
+        ],
+        default="lastfm"
+    )
+
+    raw_count = models.IntegerField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = TrackTagManager()
+
+    class Meta:
+        unique_together = ("track", "tag", "source")
+        ordering = ["-weight"]
+        indexes = [
+            models.Index(fields=["track", "-weight"]),
+            models.Index(fields=["tag", "-weight"]),
+            models.Index(fields=["source"]),
+        ]
+
+    def __str__(self):
+        return f"{self.track.name} · {self.tag.name} ({self.weight:.2f})"
+
+
+class ArtistLastFMData(models.Model):
+    """Raw cache of Last.fm API responses"""
+    artist = models.OneToOneField(
+        Artist,
+        on_delete=models.CASCADE,
+        related_name="lastfm_cache"
+    )
+    lastfm_name = models.CharField(max_length=255)
+    lastfm_url = models.URLField(null=True, blank=True)
+    mbid = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+
+    listeners = models.BigIntegerField(null=True, blank=True)
+    playcount = models.BigIntegerField(null=True, blank=True)
+
+    # Raw tags from Last.fm (not normalized yet)
+    raw_tags = models.JSONField(default=list, blank=True)
+    # [{"name": "indie rock", "count": 100}, ...]
+
+    bio_summary = models.TextField(null=True, blank=True)
+    image_url = models.URLField(null=True, blank=True)
+
+    match_confidence = models.FloatField(
+        default=1.0,
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
+    )
+
+    fetched_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'lastfm_artist_cache'
+        indexes = [
+            models.Index(fields=['fetched_at']),
+            models.Index(fields=['playcount']),
+        ]
+
+    def needs_refresh(self, days=30):
+        return self.fetched_at < timezone.now() - timedelta(days=days)
+
+
+class TrackLastFMData(models.Model):
+    """Raw cache of Last.fm API responses"""
+    track = models.OneToOneField(
+        Track,
+        on_delete=models.CASCADE,
+        related_name="lastfm_cache"
+    )
+    lastfm_name = models.CharField(max_length=255)
+    lastfm_artist_name = models.CharField(max_length=255)
+    lastfm_url = models.URLField(null=True, blank=True)
+    mbid = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+
+    listeners = models.BigIntegerField(null=True, blank=True)
+    playcount = models.BigIntegerField(null=True, blank=True)
+
+    raw_tags = models.JSONField(default=list, blank=True)
+
+    match_confidence = models.FloatField(
+        default=1.0,
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
+    )
+
+    fetched_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'lastfm_track_cache'
+        indexes = [
+            models.Index(fields=['fetched_at']),
+            models.Index(fields=['playcount']),
+        ]
+
+    def needs_refresh(self, days=30):
+        return self.fetched_at < timezone.now() - timedelta(days=days)
+
+
+class BaseSimiliarityManager(models.Manager):
+    """
+        Base manager for similarity models.
+        Subclasses MUST define:
+        - from_field
+        - to_field
+        """
+    from_field:str|None = None
+    to_field:str|None = None
+
+    def _validate_fields(self):
+        if not self.from_field or not self.to_field:
+            raise NotImplementedError(
+                "from_field and to_field must be defined in subclass"
+            )
+
+    def top_similiar(self, obj, source=None,limit=20):
+        """
+                Get top N similar items for a single object.
+                """
+        self._validate_fields()
+        qs = self.filter(**{self.from_field: obj})
+        if source:
+            qs=qs.filter(source=source)
+
+        return (qs.select_related(self.to_field).order_by("-score")[:limit]
+                )
+
+    def batch_similiar(self,objects,source=None):
+        """
+        Get similarities for MANY objects.
+
+        IMPORTANT:
+        - This does NOT apply per-object limits.
+        - Limit per object MUST be applied in Python or SQL window functions.
+        """
+        self._validate_fields()
+
+        filter_key=f'{self.from_field}__in'
+        qs=self.filter(**{filter_key: objects})
+        if source:
+            qs.filter(source=source)
+
+        return (
+            qs.select_related(self.to_field,self.to_field).order_by(self.from_field,"-score")
+        )
+
+    def for_object(self, obj):
+        """
+        Get all similarity records where obj appears
+        either as 'from' or 'to'.
+        Intended for debugging / introspection.
+        """
+        self._validate_fields()
+        from_q=Q(**{self.from_field:obj})
+        to_q=Q(**{self.to_field:obj})
+        return self.filter(from_q|to_q)
+
+class ArtistSimilarityManager(BaseSimiliarityManager):
+    from_field = "from_artist"
+    to_field = "to_artist"
+
+
+class TrackSimilarityManager(BaseSimiliarityManager):
+    from_field = "from_track"
+    to_field = "to_track"
+
+class BaseSimilarity(models.Model):
+    """
+    Abstract base model for similarity records.
+    """
+    score=models.FloatField(
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)],
+        db_index=True
+    )
+
+    source = models.CharField(
+        max_length=20,
+        choices=[
+            ("lastfm", "Last.fm"),
+            ("tags", "Tag-based"),
+            ("audio", "Audio-based"),
+            ("hybrid", "Hybrid"),
+        ],
+        default="tags"
+    )
+
+    score_breakdown=models.JSONField(
+        null=True,
+        blank=True,
+        help_text='Explainability data, e.g. {"tag_sim": 0.7, "audio_sim": 0.5}'
+    )
+
+    computed_at=models.DateTimeField(auto_now=True)
+    created_at=models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        abstract = True
+        ordering=['-score']
+
+    def __str__(self):
+        return f"{self.get_from()} → {self.get_to()} ({self.score:.2f})"
+
+    def get_from(self):
+        raise NotImplementedError
+
+    def get_to(self):
+        raise NotImplementedError
+
+class ArtistSimilarity(BaseSimilarity):
+    from_artist = models.ForeignKey(
+        "Artist",
+        on_delete=models.CASCADE,
+        related_name="similar_to"
+    )
+    to_artist = models.ForeignKey(
+        "Artist",
+        on_delete=models.CASCADE,
+        related_name="similar_from"
+    )
+
+    objects = ArtistSimilarityManager()
+
+    class Meta:
+        unique_together = ("from_artist", "to_artist", "source")
+        ordering=['-score']
+        indexes = [
+            models.Index(fields=["from_artist", "source", "-score"]),
+            models.Index(fields=["to_artist", "-score"]),
+        ]
+        verbose_name = "Artist Similarity"
+        verbose_name_plural = "Artist Similarities"
+
+    def get_from(self):
+        return self.from_artist.name
+
+    def get_to(self):
+        return self.to_artist.name
+
+class TrackSimilarity(BaseSimilarity):
+    from_track = models.ForeignKey(
+        "Track",
+        on_delete=models.CASCADE,
+        related_name="similar_to"
+    )
+    to_track = models.ForeignKey(
+        "Track",
+        on_delete=models.CASCADE,
+        related_name="similar_from"
+    )
+
+    objects = TrackSimilarityManager()
+
+    class Meta:
+        unique_together = ("from_track", "to_track", "source")
+        ordering = ["-score"]
+        indexes = [
+            models.Index(fields=["from_track", "source", "-score"]),
+            models.Index(fields=["to_track", "-score"]),
+        ]
+        verbose_name = "Track Similarity"
+        verbose_name_plural = "Track Similarities"
+
+    def get_from(self):
+        return self.from_track.name
+
+    def get_to(self):
+        return self.to_track.name
+
+
 class YoutubeAccount(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
 
@@ -490,7 +935,7 @@ class UserYoutubeChannel(models.Model):
     subscribed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
-    # 🔔 Dodatkowe opcje
+    #  Dodatkowe opcje
     notifications_enabled = models.BooleanField(default=True)
 
     objects = UserYoutubeChannelManager()
