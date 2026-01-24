@@ -187,38 +187,79 @@ class Track(models.Model):
 
 class UserTopItem(models.Model):
     TIME_RANGE_CHOICES = [
-        ('short_term', 'Last 4 weeks'),
-        ('medium_term', 'Last 6 months'),
-        ('long_term', 'All time'),
+        ("short_term", "Last 4 weeks"),
+        ("medium_term", "Last 6 months"),
+        ("long_term", "All time"),
     ]
 
     ITEM_TYPE_CHOICES = [
-        ('artist', 'Artist'),
-        ('track', 'Track'),
+        ("artist", "Artist"),
+        ("track", "Track"),
     ]
 
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='top_items')
-    item_type = models.CharField(max_length=255, choices=ITEM_TYPE_CHOICES)
-    time_range = models.CharField(max_length=20, choices=TIME_RANGE_CHOICES)
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="top_items"
+    )
 
-    artist = models.ForeignKey(Artist, on_delete=models.CASCADE,null=True,blank=True)
-    track = models.ForeignKey(Track, on_delete=models.CASCADE,null=True,blank=True)
+    item_type = models.CharField(
+        max_length=20,
+        choices=ITEM_TYPE_CHOICES
+    )
 
-    rank = models.IntegerField()
-    fetched_at=models.DateTimeField(auto_now_add=True)
+    time_range = models.CharField(
+        max_length=20,
+        choices=TIME_RANGE_CHOICES
+    )
 
-    ordering =[ "rank"]
-    unique_together = ["user","item_type","time_range","rank"]
+    artist = models.ForeignKey(
+        Artist,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True
+    )
 
-    constraints = [
-        models.CheckConstraint(
-            check=(
-                    models.Q(artist__isnull=False, track__isnull=True) |
-                    models.Q(artist__isnull=True, track__isnull=False)
+    track = models.ForeignKey(
+        Track,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True
+    )
+
+    rank = models.PositiveIntegerField()
+    fetched_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["rank"]
+
+        unique_together = [
+            ("user", "item_type", "time_range", "rank"),
+        ]
+
+        constraints = [
+            # exactly one of artist / track must be set
+            models.CheckConstraint(
+                check=(
+                    Q(artist__isnull=False, track__isnull=True) |
+                    Q(artist__isnull=True, track__isnull=False)
+                ),
+                name="either_artist_or_track"
             ),
-            name='either_artist_or_track_not_both'
-        )
-    ]
+            # item_type must match the populated field
+            models.CheckConstraint(
+                check=(
+                    Q(item_type="artist", artist__isnull=False, track__isnull=True) |
+                    Q(item_type="track", track__isnull=False, artist__isnull=True)
+                ),
+                name="item_type_matches_object"
+            ),
+        ]
+
+    def __str__(self):
+        if self.item_type == "artist":
+            return f"{self.user.email} · #{self.rank} artist · {self.artist.name}"
+        return f"{self.user.email} · #{self.rank} track · {self.track.name}"
 
 class ListeningHistory(models.Model):
     class EventType(models.TextChoices):
