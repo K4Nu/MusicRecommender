@@ -472,8 +472,7 @@ class Tag(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        if not self.normalized_name:
-            self.normalized_name = self.normalize(self.name)
+        self.normalized_name = self.normalize(self.name)
         super().save(*args, **kwargs)
 
     def __str__(self):
