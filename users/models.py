@@ -781,7 +781,39 @@ class BaseSimilarity(models.Model):
     def get_to(self):
         raise NotImplementedError
 
+class ArtistSimilarity(BaseSimilarity):
+    from_artist = models.ForeignKey(
+        "Artist",
+        on_delete=models.CASCADE,
+        related_name="similar_to"
+    )
+    to_artist = models.ForeignKey(
+        "Artist",
+        on_delete=models.CASCADE,
+        related_name="similar_from"
+    )
 
+    objects = ArtistSimilarityManager()
+
+    class Meta:
+        unique_together = ("from_artist", "to_artist", "source")
+        ordering=['-score']
+        indexes=[
+            models.Index(
+                ['from_artist', 'to_artist','source']
+            ),
+            models.Index(
+                ['to_artists','-score']
+            )
+        ]
+        verbose_name = "Artist Similarity"
+        verbose_name_plural = "Artist Similarities"
+
+    def get_from(self):
+        return self.from_artist.name
+
+    def get_to(self):
+        return self.to_artist.name
 
 class YoutubeAccount(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
