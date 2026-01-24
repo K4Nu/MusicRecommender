@@ -730,6 +730,16 @@ class BaseSimiliarityManager(models.Manager):
         to_q=Q(**{self.to_field:obj})
         return self.filter(from_q|to_q)
 
+class ArtistSimilarityManager(BaseSimiliarityManager):
+    from_field = "from_artist"
+    to_field = "to_artist"
+
+
+class TrackSimilarityManager(BaseSimiliarityManager):
+    from_field = "from_track"
+    to_field = "to_track"
+
+
 class YoutubeAccount(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
 
