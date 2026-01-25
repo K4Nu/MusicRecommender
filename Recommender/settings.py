@@ -8,6 +8,9 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv()
 
+# ---------------------- API KEY --------------------------
+LAST_FM_API_KEY=os.getenv("LAST_FM_API_KEY")
+
 # ---------------------- SECURITY / DEBUG ----------------------
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-change-me")
 DEBUG = os.getenv("DEBUG", "True") == "True"
@@ -209,3 +212,4 @@ CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
+

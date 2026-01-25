@@ -6,7 +6,6 @@ from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
-from django.contrib.auth.models import User
 from django.utils import timezone
 from django.conf import settings
 from cryptography.fernet import Fernet
@@ -15,11 +14,13 @@ from datetime import timedelta
 
 
 class EncryptedTextField(models.TextField):
-    """Pole tekstowe z automatycznym szyfrowaniem/deszyfrowaniem"""
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        key = base64.urlsafe_b64encode(settings.SECRET_KEY[:32].encode().ljust(32)[:32])
+
+        key = settings.FIELD_ENCRYPTION_KEY
+        if isinstance(key, str):
+            key = key.encode()
+
         self.cipher = Fernet(key)
 
     def get_prep_value(self, value):
@@ -31,7 +32,6 @@ class EncryptedTextField(models.TextField):
     def from_db_value(self, value, expression, connection):
         if value is None:
             return value
-        # Deszyfruj po pobraniu z bazy
         return self.cipher.decrypt(value.encode()).decode()
 
     def to_python(self, value):
@@ -911,7 +911,7 @@ class YoutubeAccount(models.Model):
         return self.expires_at < threshold
 
     def __str__(self):
-        return f"{self.user.email} - {self.youtube_id}"
+        return f"{self.user.email} - Youtube"
 
     def update_tokens(self, access_token, refresh_token=None, expires_in=3600):
         self.access_token = access_token

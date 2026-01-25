@@ -326,7 +326,8 @@ class TestLastFM(APIView):
 
     def get(self,request):
         user_id=self.request.user.id
-        sync_user_top_artists(user_id)
+        sync_user_top_artists.delay(user_id)
+
 
         return Response(
             {"detail":"Tokens valid, Recommendations placeholder",
