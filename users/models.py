@@ -134,7 +134,7 @@ class Genre(models.Model):
         return self.name
 
 class Artist(models.Model):
-    spotify_id = models.CharField(max_length=255, unique=True)
+    spotify_id = models.CharField(max_length=255, unique=True,blank=True,null=True)
     name=models.CharField(max_length=255)
     genres=models.ManyToManyField(Genre, related_name='artists')
     popularity=models.IntegerField(null=True)
@@ -149,7 +149,7 @@ class Album(models.Model):
         SINGLE = "single", "Single"
         COMPILATION = "compilation", "Compilation"
 
-    spotify_id = models.CharField(max_length=255, unique=True)
+    spotify_id = models.CharField(max_length=255, unique=True,blank=True,null=True)
     name = models.CharField(max_length=255)
 
     album_type = models.CharField(
@@ -173,7 +173,7 @@ class Album(models.Model):
         return self.name
 
 class Track(models.Model):
-    spotify_id = models.CharField(max_length=255, unique=True)
+    spotify_id = models.CharField(max_length=255, unique=True,null=True,blank=True)
     name=models.CharField(max_length=255)
     artists=models.ManyToManyField(Artist, related_name='tracks')
     album=models.ForeignKey(Album, on_delete=models.CASCADE, related_name='tracks')
