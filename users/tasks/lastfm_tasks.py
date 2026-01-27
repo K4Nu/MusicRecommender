@@ -362,3 +362,29 @@ def _process_similar_artist(
         },
     )
 
+@shared_task
+def sync_user_top_tracks(user_id:int)->None:
+    tracks_ids=set(
+        UserTopItem.objects.filter(
+            user_id=user_id,
+            item_type="track",
+        ).values_list("track_id", flat=True)
+    )
+
+    for track_id in tracks_ids:
+        get_track_info.delay(track_id)
+        get_similiar_tracks.delay(track_id)
+
+@shared_task(
+    bind=True,
+    autoretry_for=(requests.RequestException,),
+    retry_kwargs={"max_retries": 3, "countdown": 10},
+)
+def get_track_info(track_id: int):
+    pass
+
+def get_similar_track_task(artist_id: int) -> None:
+    get_similiar_artists(artist_id)
+
+def get_similiar_tracks(artist_id: int) -> None:
+    pass
