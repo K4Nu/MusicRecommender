@@ -373,15 +373,82 @@ def sync_user_top_tracks(user_id:int)->None:
 
     for track_id in tracks_ids:
         get_track_info.delay(track_id)
-        get_similiar_tracks.delay(track_id)
+        #get_similiar_tracks.delay(track_id)
 
 @shared_task(
     bind=True,
     autoretry_for=(requests.RequestException,),
     retry_kwargs={"max_retries": 3, "countdown": 10},
 )
-def get_track_info(track_id: int):
-    pass
+def get_track_info(self,track_id: int):
+    try:
+        with ResourceLock("track-info", track_id, timeout=600):
+            _fetch_track_info(track_id)
+    except ResourceLockedException:
+        logger.info("Track info already being processed", extra={"track_id": track_id})
+
+def _fetch_track_info(track_id: int):
+    track = Track.objects.filter(id=track_id).first()
+    if not track:
+        logger.info("Track not found", extra={"track_id": track_id})
+        return
+
+    lastfm = TrackLastFMData.objects.filter(track=track).first()
+    if lastfm and timezone.now() - lastfm.fetched_at < timedelta(days=LASTFM_DAYS_TTL):
+        return
+
+    artist = track.artists.first()
+    if not artist:
+        logger.warning("Track has no artists", extra={"track_id": track_id})
+        return
+
+    data = lastfm_get({
+        "method": "track.getInfo",
+        "track": track.name,
+        "artist": artist.name,
+        "autocorrect": 1,
+    })
+
+    if not data or "error" in data or "track" not in data:
+        logger.warning(
+            "Last.fm track.getInfo failed",
+            extra={"track_id": track_id, "response": data}
+        )
+        return
+
+    track_data = data["track"]
+    stats = track_data.get("stats", {})
+    artist_data = track_data.get("artist")
+    artist_name = None
+
+    if isinstance(artist_data, dict):
+        artist_name = artist_data.get("name")
+
+    lastfm_obj, _ = TrackLastFMData.objects.update_or_create(
+        track=track,
+        defaults={
+            "lastfm_name": track_data.get("name", track.name),
+            "lastfm_artist_name":artist_name,
+            "lastfm_url": track_data.get("url"),
+            "mbid": track_data.get("mbid"),
+            "listeners": int(stats.get("listeners", 0) or 0),
+            "playcount": int(stats.get("playcount", 0) or 0),
+            "raw_tags": track_data.get("tags", {}).get("tag", []),
+            "fetched_at": timezone.now(),
+        },
+    )
+
+    artist_name = track_data.get("artist", {}).get("name")
+    if artist_name:
+        artist_obj, _ = Artist.objects.get_or_create(
+            name__iexact=artist_name,
+            defaults={"name": artist_name}
+        )
+        _fetch_artist_info(artist_obj.id)
+
+    logger.info(
+        f'Fetch for {track_id} was successful',
+    )
 
 def get_similar_track_task(artist_id: int) -> None:
     get_similiar_artists(artist_id)
