@@ -1,4 +1,6 @@
-from celery import shared_task
+from collections import defaultdict
+
+from celery import shared_task, chain
 from django.utils import timezone
 from django.conf import settings
 from datetime import timedelta
@@ -38,17 +40,13 @@ def lastfm_get(params: dict) -> dict | None:
         logger.error("LAST_FM_API_KEY not set")
         return None
 
-    try:
-        response = requests.get(
-            LASTFM_URL,
-            params={**params, "api_key": api_key, "format": "json"},
-            timeout=(3,20),
-        )
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        logger.warning("Last.fm request failed", exc_info=e)
-        return None
+    response = requests.get(
+        LASTFM_URL,
+        params={**params, "api_key": api_key, "format": "json"},
+        timeout=(3, 20),
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 # ============================================================
@@ -75,10 +73,21 @@ def get_cached_tag(normalized: str, name: str) -> Tag:
     TAG_CACHE[normalized] = tag
     return tag
 
-
+@shared_task
+def lastfm_initial_sync(user_id: int) -> None:
+    chain(
+        sync_user_top_artists.s(user_id),
+        sync_user_top_tracks.s(user_id),
+        sync_end.s(),
+    ).delay()
 # ============================================================
 # ORCHESTRATION – USER TOP ARTISTS
 # ============================================================
+@shared_task
+def sync_end():
+    logger.info("Sync finished")
+    return
+
 @shared_task
 def sync_user_top_artists(user_id: int) -> None:
     artist_ids = set(
@@ -362,3 +371,247 @@ def _process_similar_artist(
         },
     )
 
+@shared_task
+def sync_user_top_tracks(user_id:int)->None:
+    tracks_ids=set(
+        UserTopItem.objects.filter(
+            user_id=user_id,
+            item_type="track",
+        ).values_list("track_id", flat=True)
+    )
+
+    for track_id in tracks_ids:
+        get_track_info.delay(track_id)
+        get_similar_track_task.delay(track_id)
+
+@shared_task(
+    bind=True,
+    autoretry_for=(requests.RequestException,),
+    retry_kwargs={"max_retries": 3, "countdown": 10},
+)
+def get_track_info(self,track_id: int):
+    try:
+        with ResourceLock("track-info", track_id, timeout=600):
+            _fetch_track_info(track_id)
+    except ResourceLockedException:
+        logger.info("Track info already being processed", extra={"track_id": track_id})
+
+def _fetch_track_info(track_id: int):
+    track = Track.objects.filter(id=track_id).first()
+    if not track:
+        logger.info("Track not found", extra={"track_id": track_id})
+        return
+
+    lastfm = TrackLastFMData.objects.filter(track=track).first()
+    if lastfm and timezone.now() - lastfm.fetched_at < timedelta(days=LASTFM_DAYS_TTL):
+        return
+
+    artist = track.artists.first()
+    if not artist:
+        logger.warning("Track has no artists", extra={"track_id": track_id})
+        return
+
+    data = lastfm_get({
+        "method": "track.getInfo",
+        "track": track.name,
+        "artist": artist.name,
+        "autocorrect": 1,
+    })
+
+    if not data or "error" in data or "track" not in data:
+        logger.warning(
+            "Last.fm track.getInfo failed",
+            extra={"track_id": track_id, "response": data}
+        )
+        return
+
+    track_data = data["track"]
+    stats = track_data.get("stats", {})
+    artist_data = track_data.get("artist")
+    artist_name = None
+
+    if isinstance(artist_data, dict):
+        artist_name = artist_data.get("name")
+
+    lastfm_obj, _ = TrackLastFMData.objects.update_or_create(
+        track=track,
+        defaults={
+            "lastfm_name": track_data.get("name", track.name),
+            "lastfm_artist_name":artist_name,
+            "lastfm_url": track_data.get("url"),
+            "mbid": track_data.get("mbid"),
+            "listeners": int(stats.get("listeners", 0) or 0),
+            "playcount": int(stats.get("playcount", 0) or 0),
+            "raw_tags": track_data.get("tags", {}).get("tag", []),
+            "fetched_at": timezone.now(),
+            "raw_tags":track_data.get("tags", {}).get("tag", []),
+        },
+    )
+
+    artist_name = track_data.get("artist", {}).get("name")
+    if artist_name:
+        artist_obj, _ = Artist.objects.get_or_create(
+            name__iexact=artist_name,
+            defaults={"name": artist_name}
+        )
+        _fetch_artist_info(artist_obj.id)
+
+    logger.info(
+        f'Fetch for {track_id} was successful',
+    )
+
+    _inherit_tracK_tags(track_id)
+
+@shared_task
+def get_similar_track_task(track_id: int) -> None:
+    get_similiar_tracks(track_id)
+
+def get_similiar_tracks(track_id: int) -> None:
+    track=Track.objects.filter(id=track_id).first()
+    if not track:
+        logger.info("Track not found", extra={"track_id": track_id})
+        return
+
+    data=lastfm_get({
+        "method": "track.getSimilar",
+        "track": track.name,
+        "autocorrect": 1,
+        "limit": 50,
+    })
+
+    similar_items = (
+        data
+        .get("similartracks", {})
+        .get("track", [])
+        if data else []
+    )
+
+    for item in similar_items:
+        name = item.get("name")
+        match=float(item.get("match", 0.0))
+
+        if not name or match <= 0:
+            continue
+
+        process_similar_track.delay(
+            track_id=track_id,
+            similar_name=name,
+            score=match,
+            image_url=item.get("image", [{}])[-1].get("#text"),
+            mbid=item.get("mbid"),
+        )
+
+@shared_task(
+    autoretry_for=(Exception,),
+    retry_kwargs={"max_retries": 3, "countdown": 10},
+)
+def process_similar_track(
+    track_id: int,
+    similar_name: str,
+    score: float,
+    image_url: str | None = None,
+    mbid: str | None = None,
+) -> None:
+    lock_id = f"{track_id}:{similar_name.lower()}"
+    try:
+        with ResourceLock("track-similar-lastfm", lock_id, timeout=600):
+            _process_similar_track(
+                track_id,
+                similar_name,
+                score,
+                image_url,
+                mbid,
+            )
+    except ResourceLockedException:
+        logger.info(
+            "Last.fm similar artist already processed",
+            extra={"artist_id": track_id, "similar": similar_name},
+        )
+
+def _process_similar_track(
+    artist_id: int,
+    similar_name: str,
+    score: float,
+    image_url: str | None = None,
+    mbid: str | None = None,
+) -> None:
+    track = Track.objects.filter(id=artist_id).first()
+    if not track:
+        return
+
+    similar_track = (
+        Track.objects
+        .filter(name__iexact=similar_name)
+        .first()
+    )
+
+    if not similar_track:
+        similiar_track = Track.objects.create(
+            name=similar_name,
+            image_url=image_url,
+        )
+
+    # Normalize score to [0,1]
+    score = max(0.0, min(float(score), 1.0))
+
+    TrackSimilarity.objects.update_or_create(
+        from_track=track,
+        to_track=similiar_track,
+        source="lastfm",
+        defaults={
+            "score": score,
+            "score_breakdown": {
+                "lastfm_match": score,
+            },
+        },
+    )
+
+def _inherit_tracK_tags(track_id:int)->None:
+    track=Track.objects.prefetch_related("artists__artists_tags__tag").filter(id=track_id).first()
+
+    if not track:
+        logger.info("Track not found", extra={"track_id": track_id})
+        return
+
+    artists=track.artists.all()
+    if not artists:
+        logger.info("Track has no artists", extra={"track_id": track_id})
+        return
+
+    tag_accumulator=defaultdict(list)
+    artist_count=artists.count()
+
+    for artist in artists:
+        artists_tags=artist.artists_tags.fitler(is_active=True,source__in=["lastm","computed"])
+
+        for at in artists_tags:
+            tag_accumulator[at.tag]+=at.weight
+
+    TrackTag.objects.filter(track=track,source="artist",).delete()
+
+    to_create=[]
+    for tag_id, total_weight in tag_accumulator.items():
+        weight=min(total_weight/artist_count, 1.0)
+
+        if weight < 0.05:
+            continue
+
+        to_create.append(
+            TrackTag(
+                track=track,
+                tag_id=tag_id,
+                weight=weight,
+                source="artist",
+                is_active=True,
+            )
+        )
+    if to_create:
+        TrackTag.objects.bulk_create(to_create)
+
+    logger.info(
+        "Inherited track tags from artists",
+        extra={
+            "track_id": track_id,
+            "artists": artist_count,
+            "tags_created": len(to_create),
+        },)
