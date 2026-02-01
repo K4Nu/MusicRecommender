@@ -23,7 +23,6 @@ from users.models import (
 )
 from django.db import transaction
 
-
 logger = logging.getLogger(__name__)
 
 LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
@@ -39,18 +38,100 @@ def get_lastfm_api_key() -> str | None:
 
 
 def lastfm_get(params: dict) -> dict | None:
+    """
+    Wykonuje zapytanie do Last.fm API z obsługą błędów.
+
+    Returns:
+        dict | None: JSON response lub None jeśli zasób nie istnieje (404)
+
+    Raises:
+        requests.RequestException: dla błędów sieci/timeoutu (będzie retry)
+        requests.HTTPError: dla błędów serwera 5xx (będzie retry)
+    """
     api_key = get_lastfm_api_key()
     if not api_key:
         logger.error("LAST_FM_API_KEY not set")
         return None
 
-    response = requests.get(
-        LASTFM_URL,
-        params={**params, "api_key": api_key, "format": "json"},
-        timeout=(3, 20),
-    )
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.get(
+            LASTFM_URL,
+            params={**params, "api_key": api_key, "format": "json"},
+            timeout=(3, 20),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    except requests.HTTPError as e:
+        status_code = e.response.status_code
+
+        # Błędy serwera (5xx) - Last.fm ma problem, warto spróbować ponownie
+        if status_code >= 500:
+            logger.warning(
+                f"Last.fm server error {status_code} - will retry",
+                extra={
+                    "params": params,
+                    "status": status_code,
+                    "url": e.response.url
+                }
+            )
+            # Propaguj wyjątek - Celery spróbuje ponownie
+            raise
+
+        # 404 - zasób nie istnieje, nie ma sensu retry
+        elif status_code == 404:
+            logger.info(
+                "Last.fm resource not found (404)",
+                extra={"params": params}
+            )
+            return None
+
+        # 429 - rate limit
+        elif status_code == 429:
+            logger.warning(
+                "Last.fm rate limit exceeded",
+                extra={"params": params}
+            )
+            # Propaguj - Celery może spróbować z dłuższym opóźnieniem
+            raise
+
+        # 400, 403 - błąd klienta, nie ma sensu retry
+        elif status_code in (400, 403):
+            logger.error(
+                f"Last.fm client error {status_code}",
+                extra={"params": params, "response": e.response.text[:200]}
+            )
+            return None
+
+        # Inne błędy HTTP
+        else:
+            logger.error(
+                f"Last.fm HTTP error {status_code}",
+                extra={"params": params}
+            )
+            raise
+
+    except requests.Timeout as e:
+        logger.warning(
+            "Last.fm request timeout - will retry",
+            extra={"params": params}
+        )
+        raise
+
+    except requests.ConnectionError as e:
+        logger.warning(
+            "Last.fm connection error - will retry",
+            extra={"params": params}
+        )
+        raise
+
+    except requests.RequestException as e:
+        logger.error(
+            "Last.fm request failed",
+            extra={"params": params, "error": str(e)}
+        )
+        raise
+
 
 def safe_cache_key(value: str) -> str:
     """
@@ -87,9 +168,9 @@ def get_cached_tag(normalized: str, name: str) -> Tag:
 @shared_task
 def lastfm_initial_sync(user_id: int) -> None:
     chain(
-        sync_user_top_artists.s(user_id),
-        sync_user_top_tracks.s(user_id),
-        sync_end.s(),
+        sync_user_top_artists.si(user_id),
+        sync_user_top_tracks.si(user_id),
+        sync_end.si(),
     ).delay()
 
 
@@ -123,6 +204,9 @@ def sync_user_top_artists(user_id: int) -> None:
     bind=True,
     autoretry_for=(requests.RequestException,),
     retry_kwargs={"max_retries": 3, "countdown": 10},
+    retry_backoff=True,  # Exponential backoff
+    retry_backoff_max=600,  # Max 10 minut
+    retry_jitter=True,  # Losowe opóźnienie
 )
 def get_artist_info(self, artist_id: int) -> None:
     try:
@@ -215,13 +299,13 @@ def _process_artist_tags(artist_id: int) -> None:
         logger.warning(f"❌ No ArtistLastFMData found for artist_id={artist_id}")
         return
 
-    logger.info(f" Found ArtistLastFMData for {lastfm.artist.name}")
+    logger.info(f"✅ Found ArtistLastFMData for {lastfm.artist.name}")
 
     if not lastfm.raw_tags:
         logger.warning(f"❌ No raw_tags for {lastfm.artist.name}, raw_tags={lastfm.raw_tags}")
         return
 
-    logger.info(f" Found {len(lastfm.raw_tags)} raw tags")
+    logger.info(f"✅ Found {len(lastfm.raw_tags)} raw tags")
 
     artist = lastfm.artist
 
@@ -242,7 +326,7 @@ def _process_artist_tags(artist_id: int) -> None:
         try:
             count = int(raw.get("count"))
             weight = min(count / 100.0, 1.0)
-            logger.info(f" Tag '{name}': count={count}, weight={weight}")
+            logger.info(f"✅ Tag '{name}': count={count}, weight={weight}")
         except (TypeError, ValueError) as e:
             weight = max(0.1, 1.0 - idx * 0.1)
             count = None
@@ -251,7 +335,7 @@ def _process_artist_tags(artist_id: int) -> None:
         normalized = Tag.normalize(name)
         tag = get_cached_tag(normalized, name)
 
-        logger.info(f" Got/created Tag: {tag.name} (normalized: {normalized})")
+        logger.info(f"✅ Got/created Tag: {tag.name} (normalized: {normalized})")
 
         to_create.append(
             ArtistTag(
@@ -272,16 +356,15 @@ def _process_artist_tags(artist_id: int) -> None:
                 to_create,
                 ignore_conflicts=True,
             )
-            logger.info(f" bulk_create returned {len(result)} objects")
+            logger.info(f"✅ bulk_create returned {len(result)} objects")
 
             actual_count = ArtistTag.objects.filter(artist=artist, source="lastfm").count()
-            logger.info(f" Database now has {actual_count} ArtistTag records for {artist.name}")
+            logger.info(f"✅ Database now has {actual_count} ArtistTag records for {artist.name}")
 
         except Exception as e:
             logger.error(f"❌ bulk_create failed: {e}", exc_info=True)
     else:
         logger.warning(f"⚠️ No tags to create for {artist.name}")
-
 
     track_ids = artist.tracks.values_list("id", flat=True)
 
@@ -295,13 +378,15 @@ def _process_artist_tags(artist_id: int) -> None:
             "tracks": len(track_ids),
         }
     )
+    get_similar_artists_task.delay(artist.id)
     logger.info(f"🏁 END _process_artist_tags for {artist.name}")
+
 
 # ============================================================
 # SIMILAR ARTISTS
 # ============================================================
 
-def get_similar_artists(artist_id: int) -> None:  #  Poprawiono typo
+def get_similar_artists(artist_id: int) -> None:
     artist = Artist.objects.filter(id=artist_id).first()
     if not artist:
         return
@@ -312,6 +397,10 @@ def get_similar_artists(artist_id: int) -> None:  #  Poprawiono typo
         "autocorrect": 1,
         "limit": 50,
     })
+
+    if not data:
+        # lastfm_get zwraca None dla 404 lub błędów klienta
+        return
 
     similar_items = data.get("similarartists", {}).get("artist")
 
@@ -328,7 +417,7 @@ def get_similar_artists(artist_id: int) -> None:  #  Poprawiono typo
             continue
 
         try:
-            match = float(item.get("match", 0.0))  #  Dodano obsługę błędów
+            match = float(item.get("match", 0.0))
         except (ValueError, TypeError):
             continue
 
@@ -348,11 +437,14 @@ def get_similar_artists(artist_id: int) -> None:  #  Poprawiono typo
 
 
 @shared_task(
-    autoretry_for=(Exception,),
+    autoretry_for=(requests.RequestException,),
     retry_kwargs={"max_retries": 3, "countdown": 10},
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
 )
 def get_similar_artists_task(artist_id: int) -> None:
-    get_similar_artists(artist_id)  #  Poprawiono typo
+    get_similar_artists(artist_id)
 
 
 @shared_task(
@@ -439,6 +531,9 @@ def sync_user_top_tracks(user_id: int) -> None:
     bind=True,
     autoretry_for=(requests.RequestException,),
     retry_kwargs={"max_retries": 3, "countdown": 10},
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
 )
 def get_track_info(self, track_id: int):
     try:
@@ -449,7 +544,6 @@ def get_track_info(self, track_id: int):
 
 
 def _fetch_track_info(track_id: int):
-
     track = (
         Track.objects
         .select_related('album', 'lastfm_cache')
@@ -508,14 +602,13 @@ def _fetch_track_info(track_id: int):
         },
     )
 
-    #  Użyj asynchronicznego wywołania
     artist_name = track_data.get("artist", {}).get("name")
     if artist_name:
         artist_obj = Artist.objects.filter(name__iexact=artist_name).first()
         if not artist_obj:
             artist_obj = Artist.objects.create(name=artist_name)
 
-        get_artist_info.delay(artist_obj.id)  #  ASYNCHRONICZNIE!
+        get_artist_info.delay(artist_obj.id)
 
     logger.info(f'Fetch for {track_id} was successful')
 
@@ -524,13 +617,19 @@ def _fetch_track_info(track_id: int):
 # SIMILAR TRACKS
 # ============================================================
 
-@shared_task
+@shared_task(
+    autoretry_for=(requests.RequestException,),
+    retry_kwargs={"max_retries": 3, "countdown": 10},
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+)
 def get_similar_track_task(track_id: int) -> None:
-    get_similar_tracks(track_id)  #  Poprawiono typo
+    get_similar_tracks(track_id)
 
 
 def get_similar_tracks(track_id: int) -> None:
-    """ Poprawiona wersja - przekazuje artist_name"""
+    """Pobiera podobne utwory z Last.fm"""
     try:
         track = (
             Track.objects
@@ -559,6 +658,11 @@ def get_similar_tracks(track_id: int) -> None:
 
     data = lastfm_get(params)
     if not data:
+        # lastfm_get zwraca None dla 404 lub błędów klienta
+        logger.info(
+            "No similar tracks data from Last.fm",
+            extra={"track_id": track_id, "params": params}
+        )
         return
 
     similar_items = data.get("similartracks", {}).get("track", [])
@@ -579,7 +683,7 @@ def get_similar_tracks(track_id: int) -> None:
         if match <= 0:
             continue
 
-        #  Extract artist info from response
+        # Extract artist info from response
         artist_data = item.get("artist")
         artist_name = None
 
@@ -591,7 +695,7 @@ def get_similar_tracks(track_id: int) -> None:
         images = item.get("image", [])
         image_url = images[-1].get("#text") if images else None
 
-        #  Pass artist_name to processing task
+        # Pass artist_name to processing task
         process_similar_track.delay(
             track_id=track.id,
             similar_name=name,
@@ -607,21 +711,21 @@ def get_similar_tracks(track_id: int) -> None:
     retry_kwargs={"max_retries": 3, "countdown": 10},
 )
 def process_similar_track(
-    track_id: int,
-    similar_name: str,
-    similar_artist_name: str | None,
-    score: float,
-    image_url: str | None = None,
-    mbid: str | None = None,
+        track_id: int,
+        similar_name: str,
+        similar_artist_name: str | None,
+        score: float,
+        image_url: str | None = None,
+        mbid: str | None = None,
 ) -> None:
     raw_key = f"{track_id}:{similar_name}:{similar_artist_name}"
     lock_id = safe_cache_key(raw_key)
 
     try:
         with ResourceLock(
-            resource_type="track-similar-lastfm",
-            resource_id=lock_id,
-            timeout=600
+                resource_type="track-similar-lastfm",
+                resource_id=lock_id,
+                timeout=600
         ):
             _process_similar_track(
                 track_id,
@@ -637,13 +741,14 @@ def process_similar_track(
             extra={"track_id": track_id, "similar": similar_name},
         )
 
+
 def _process_similar_track(
-    track_id: int,
-    similar_name: str,
-    similar_artist_name: str | None,
-    score: float,
-    image_url: str | None = None,
-    mbid: str | None = None,
+        track_id: int,
+        similar_name: str,
+        similar_artist_name: str | None,
+        score: float,
+        image_url: str | None = None,
+        mbid: str | None = None,
 ) -> None:
     track = Track.objects.filter(id=track_id).first()
     if not track:
@@ -680,8 +785,8 @@ def _process_similar_track(
         for candidate in candidates:
             artist = candidate.artists.first()
             if artist and artist_names_compatible(
-                artist.name,
-                similar_artist_name
+                    artist.name,
+                    similar_artist_name
             ):
                 similar_track = candidate
                 break
@@ -750,11 +855,12 @@ def _process_similar_track(
         }
     )
 
+
 def _create_track_from_lastfm(
-    track_name: str,
-    artist_name: str | None,
-    mbid: str | None = None,
-    image_url: str | None = None,
+        track_name: str,
+        artist_name: str | None,
+        mbid: str | None = None,
+        image_url: str | None = None,
 ) -> Track | None:
     """
     Create minimal Track stub from Last.fm track.getSimilar response.
@@ -799,7 +905,7 @@ def _create_track_from_lastfm(
         track = Track.objects.create(
             name=track_name,
             album=album,
-            duration_ms=0,          # unknown
+            duration_ms=0,  # unknown
             popularity=None,
             preview_url=None,
             image_url=image_url,
@@ -836,6 +942,7 @@ def _create_track_from_lastfm(
 
     return track
 
+
 # ============================================================
 # TAG INHERITANCE
 # ============================================================
@@ -844,7 +951,7 @@ def inherit_track_tags_task(track_id: int):
     _inherit_track_tags(track_id)
 
 
-def _inherit_track_tags(track_id: int) -> None:  #  Poprawiono typo
+def _inherit_track_tags(track_id: int) -> None:
     track = (
         Track.objects
         .prefetch_related("artists__artist_tags__tag")
@@ -904,6 +1011,7 @@ def _inherit_track_tags(track_id: int) -> None:  #  Poprawiono typo
         },
     )
 
+
 def normalize_name(value: str) -> str:
     return (
         value.lower()
@@ -923,13 +1031,14 @@ def artist_names_compatible(a: str, b: str) -> bool:
 
     return a == b or a in b or b in a
 
+
 # ============================================================
 # TAG SIMILARITY - OPTYMALIZACJA
 # ============================================================
 
 def compute_track_tag_similarity(track: Track, max_candidates=1000):
     """
-     ZOPTYMALIZOWANA wersja:
+    ZOPTYMALIZOWANA wersja:
     1. Pobiera tylko tracki mające wspólne tagi
     2. Limituje liczbę kandydatów
     3. Batch operations
@@ -948,7 +1057,7 @@ def compute_track_tag_similarity(track: Track, max_candidates=1000):
         .filter(tag_id__in=tag_ids, is_active=True)
         .exclude(track_id=track.id)
         .values_list('track_id', flat=True)
-        .distinct()[:max_candidates]  #  LIMIT!
+        .distinct()[:max_candidates]  # LIMIT!
     )
 
     if not candidate_ids:
@@ -971,7 +1080,7 @@ def compute_track_tag_similarity(track: Track, max_candidates=1000):
 
         score = sum(track_tags[t] * other_tags[t] for t in common)
 
-        if score < 0.1:
+        if score < 0.3:
             continue
 
         similarities_to_create.append(

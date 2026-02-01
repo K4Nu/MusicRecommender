@@ -14,7 +14,7 @@ from users.models import SpotifyAccount,UserTopItem,YoutubeAccount,UserYoutubeCh
 from rest_framework import generics
 from .serializers import UserTopTrackSerializer
 from drf_spectacular.utils import extend_schema
-from .tasks.lastfm_tasks import sync_user_top_artists,sync_user_top_tracks
+from .tasks.lastfm_tasks import sync_user_top_artists,sync_user_top_tracks,lastfm_initial_sync
 
 class SpotifyConnect(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -326,7 +326,7 @@ class TestLastFM(APIView):
 
     def get(self,request):
         user_id=self.request.user.id
-        sync_user_top_tracks.delay(user_id)
+        lastfm_initial_sync.delay(user_id)
 
 
         return Response(
