@@ -6,7 +6,7 @@ from django.conf import settings
 from datetime import timedelta
 import logging
 import requests
-
+import heapq
 from utils.locks import ResourceLock, ResourceLockedException
 from users.models import (
     Artist,
@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
 LASTFM_DAYS_TTL = 30
-
+TOP_K = 10
+heap = []
 
 # ============================================================
 # HELPERS
@@ -750,65 +751,51 @@ def _process_similar_track(
         image_url: str | None = None,
         mbid: str | None = None,
 ) -> None:
+
+    score = max(0.0, min(float(score), 1.0))
+    if score < 0.3:
+        return
+
+    MAX_LASTFM_SIMILAR = 10
+    existing_count = TrackSimilarity.objects.filter(
+        from_track_id=track_id,
+        source="lastfm",
+    ).count()
+
+    # Allow some overflow for race conditions, will prune later
+    if existing_count >= MAX_LASTFM_SIMILAR + 5:  # Hard limit
+        return
+
     track = Track.objects.filter(id=track_id).first()
     if not track:
         return
 
-    logger.info(
-        "Processing similar track",
-        extra={
-            "from_track": track.name,
-            "similar_track": similar_name,
-            "artist": similar_artist_name,
-            "mbid": mbid,
-        }
-    )
+    logger.info("Processing similar track", extra={...})
 
     similar_track = None
 
     if mbid:
-        similar_track = (
-            Track.objects
-            .filter(lastfm_cache__mbid=mbid)
-            .select_related("lastfm_cache")
-            .first()
-        )
+        similar_track = Track.objects.filter(
+            lastfm_cache__mbid=mbid
+        ).select_related("lastfm_cache").first()
 
-    # 2️⃣ Name + artist (soft match)
     if not similar_track and similar_artist_name:
-        candidates = (
-            Track.objects
-            .filter(name__iexact=similar_name)
-            .prefetch_related("artists")
-        )
+        candidates = Track.objects.filter(
+            name__iexact=similar_name
+        ).prefetch_related("artists")
 
         for candidate in candidates:
             artist = candidate.artists.first()
-            if artist and artist_names_compatible(
-                    artist.name,
-                    similar_artist_name
-            ):
+            if artist and artist_names_compatible(artist.name, similar_artist_name):
                 similar_track = candidate
                 break
 
-    # 3️⃣ Name-only fallback (VERY soft)
-    if not similar_track:
-        similar_track = (
-            Track.objects
-            .filter(name__iexact=similar_name)
-            .first()
-        )
+    if not similar_track and score >= 0.6:  # Raised from 0.5
+        similar_track = Track.objects.filter(name__iexact=similar_name).first()
 
-    # 4️⃣ CREATE — NORMAL & EXPECTED PATH
     if not similar_track:
-        logger.info(
-            "Creating similar track from Last.fm",
-            extra={
-                "track": similar_name,
-                "artist": similar_artist_name,
-                "mbid": mbid,
-            }
-        )
+        if score < 0.6:  # Raised from 0.4
+            return
 
         similar_track = _create_track_from_lastfm(
             track_name=similar_name,
@@ -818,16 +805,8 @@ def _process_similar_track(
         )
 
         if not similar_track:
-            logger.warning(
-                "Failed to create similar track",
-                extra={"track": similar_name}
-            )
             return
 
-    # 5️⃣ Clamp score
-    score = max(0.0, min(float(score), 1.0))
-
-    # 6️⃣ Save similarity (idempotent)
     TrackSimilarity.objects.update_or_create(
         from_track=track,
         to_track=similar_track,
@@ -841,20 +820,29 @@ def _process_similar_track(
         },
     )
 
-    logger.info(
-        "Created track similarity",
-        extra={
-            "from": track.name,
-            "to": similar_track.name,
-            "artist": (
-                similar_track.artists.first().name
-                if similar_track.artists.exists()
-                else None
-            ),
-            "score": score,
-        }
-    )
+    _keep_top_k_similarities(track_id, source="lastfm", k=MAX_LASTFM_SIMILAR)
 
+    logger.info("Created track similarity", extra={...})
+
+
+def _keep_top_k_similarities(track_id: int, source: str, k: int):
+    """Keep only top K similarities by score, delete rest"""
+    all_sims = list(TrackSimilarity.objects.filter(
+        from_track_id=track_id,
+        source=source
+    ).order_by('-score').values_list('id', flat=True))
+
+    if len(all_sims) <= k:
+        return
+
+    to_keep = all_sims[:k]
+    TrackSimilarity.objects.filter(
+        from_track_id=track_id,
+        source=source
+    ).exclude(id__in=to_keep).delete()
+
+    logger.info(f"Pruned {len(all_sims) - k} excess similarities",
+                extra={"track_id": track_id, "kept": k})
 
 def _create_track_from_lastfm(
         track_name: str,
