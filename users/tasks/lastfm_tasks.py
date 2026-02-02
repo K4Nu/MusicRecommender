@@ -1097,11 +1097,10 @@ def artist_names_compatible(a: str, b: str) -> bool:
 
 def compute_track_tag_similarity(track: Track, max_candidates=1000):
     """
-    ZOPTYMALIZOWANA wersja:
-    1. Pobiera tylko tracki mające wspólne tagi
-    2. Limituje liczbę kandydatów
-    3. Batch operations
+    Compute tag-based similarities with TOP-K limiting.
     """
+    MAX_TAG_SIMILARITIES = 20  # Hard limit on similarities created
+
     track_tags = {
         tt.tag_id: tt.weight
         for tt in track.track_tags.filter(is_active=True)
@@ -1111,21 +1110,26 @@ def compute_track_tag_similarity(track: Track, max_candidates=1000):
         return
 
     tag_ids = list(track_tags.keys())
+
+    # Get candidate tracks that share tags
     candidate_ids = (
         TrackTag.objects
         .filter(tag_id__in=tag_ids, is_active=True)
         .exclude(track_id=track.id)
         .values_list('track_id', flat=True)
-        .distinct()[:max_candidates]  # LIMIT!
+        .distinct()[:max_candidates]
     )
 
     if not candidate_ids:
         return
 
-    #  Batch prefetch
-    candidates = Track.objects.filter(id__in=candidate_ids).prefetch_related('track_tags')
+    candidates = Track.objects.filter(
+        id__in=candidate_ids
+    ).prefetch_related('track_tags')
 
-    similarities_to_create = []
+    # Use a heap to keep only top K similarities
+    # Format: (score, track_id, other_track, score_breakdown)
+    top_k_heap = []
 
     for other in candidates:
         other_tags = {
@@ -1142,25 +1146,58 @@ def compute_track_tag_similarity(track: Track, max_candidates=1000):
         if score < 0.3:
             continue
 
-        similarities_to_create.append(
-            TrackSimilarity(
-                from_track=track,
-                to_track=other,
-                source="tags",
-                score=min(score, 1.0),
-                score_breakdown={
-                    "common_tags": len(common),
-                },
-            )
-        )
+        score = min(score, 1.0)
 
-    if similarities_to_create:
+        # Use heap to keep only top K
+        if len(top_k_heap) < MAX_TAG_SIMILARITIES:
+            heapq.heappush(
+                top_k_heap,
+                (score, other.id, other, {"common_tags": len(common)})
+            )
+        elif score > top_k_heap[0][0]:  # Better than worst in heap
+            heapq.heapreplace(
+                top_k_heap,
+                (score, other.id, other, {"common_tags": len(common)})
+            )
+
+    if not top_k_heap:
+        # Clean up old similarities if no new ones
         TrackSimilarity.objects.filter(
             from_track=track,
             source="tags"
         ).delete()
+        return
 
-        TrackSimilarity.objects.bulk_create(
-            similarities_to_create,
-            ignore_conflicts=True
+    # Build similarities from heap
+    similarities_to_create = [
+        TrackSimilarity(
+            from_track=track,
+            to_track=other_track,
+            source="tags",
+            score=score,
+            score_breakdown=breakdown,
         )
+        for score, _, other_track, breakdown in top_k_heap
+    ]
+
+    # Delete old similarities and create new ones
+    TrackSimilarity.objects.filter(
+        from_track=track,
+        source="tags"
+    ).delete()
+
+    TrackSimilarity.objects.bulk_create(
+        similarities_to_create,
+        ignore_conflicts=True
+    )
+
+    logger.info(
+        "Computed tag-based track similarities",
+        extra={
+            "track_id": track.id,
+            "candidates_checked": len(candidate_ids),
+            "similarities_created": len(similarities_to_create),
+            "avg_score": sum(s.score for s in similarities_to_create) / len(
+                similarities_to_create) if similarities_to_create else 0,
+        },
+    )
