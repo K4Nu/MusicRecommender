@@ -1,6 +1,6 @@
 from collections import defaultdict
 import hashlib
-from celery import shared_task, chain
+from celery import shared_task, chain, group
 from django.utils import timezone
 from django.conf import settings
 from datetime import timedelta
@@ -166,11 +166,48 @@ def get_cached_tag(normalized: str, name: str) -> Tag:
 
 @shared_task
 def lastfm_initial_sync(user_id: int) -> None:
-    chain(
-        sync_user_top_artists.si(user_id),
-        sync_user_top_tracks.si(user_id),
-        sync_end.si(),
-    ).delay()
+
+    artist_ids = list(
+        UserTopItem.objects
+        .filter(user_id=user_id, item_type="artist")
+        .values_list("artist_id", flat=True)
+    )
+
+    track_ids = list(
+        UserTopItem.objects
+        .filter(user_id=user_id, item_type="track")
+        .values_list("track_id", flat=True)
+    )
+
+    # Build all tasks upfront
+    artist_tasks = []
+    for artist_id in artist_ids:
+        artist_tasks.append(get_artist_info.si(artist_id))
+        artist_tasks.append(get_similar_artists_task.si(artist_id))
+
+    track_tasks = []
+    for track_id in track_ids:
+        track_tasks.append(get_track_info.si(track_id))
+        track_tasks.append(get_similar_track_task.si(track_id))
+
+    # Chain: artists -> tracks -> completion
+    workflow = chain(
+        group(*artist_tasks) if artist_tasks else group(),
+        group(*track_tasks) if track_tasks else group(),
+        sync_end.si(user_id),
+    )
+
+    workflow.delay()
+
+    logger.info(
+        "Started initial sync",
+        extra={
+            "user_id": user_id,
+            "artists": len(artist_ids),
+            "tracks": len(track_ids),
+            "total_tasks": len(artist_tasks) + len(track_tasks),
+        }
+    )
 
 
 # ============================================================
