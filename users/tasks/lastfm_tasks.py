@@ -1,12 +1,12 @@
 from collections import defaultdict
 import hashlib
-from celery import shared_task, chain
+from celery import shared_task, chain, group
 from django.utils import timezone
 from django.conf import settings
 from datetime import timedelta
 import logging
 import requests
-
+import heapq
 from utils.locks import ResourceLock, ResourceLockedException
 from users.models import (
     Artist,
@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 
 LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
 LASTFM_DAYS_TTL = 30
-
 
 # ============================================================
 # HELPERS
@@ -167,11 +166,48 @@ def get_cached_tag(normalized: str, name: str) -> Tag:
 
 @shared_task
 def lastfm_initial_sync(user_id: int) -> None:
-    chain(
-        sync_user_top_artists.si(user_id),
-        sync_user_top_tracks.si(user_id),
-        sync_end.si(),
-    ).delay()
+
+    artist_ids = list(
+        UserTopItem.objects
+        .filter(user_id=user_id, item_type="artist")
+        .values_list("artist_id", flat=True)
+    )
+
+    track_ids = list(
+        UserTopItem.objects
+        .filter(user_id=user_id, item_type="track")
+        .values_list("track_id", flat=True)
+    )
+
+    # Build all tasks upfront
+    artist_tasks = []
+    for artist_id in artist_ids:
+        artist_tasks.append(get_artist_info.si(artist_id))
+        artist_tasks.append(get_similar_artists_task.si(artist_id))
+
+    track_tasks = []
+    for track_id in track_ids:
+        track_tasks.append(get_track_info.si(track_id))
+        track_tasks.append(get_similar_track_task.si(track_id))
+
+    # Chain: artists -> tracks -> completion
+    workflow = chain(
+        group(*artist_tasks) if artist_tasks else group(),
+        group(*track_tasks) if track_tasks else group(),
+        sync_end.si(user_id),
+    )
+
+    workflow.delay()
+
+    logger.info(
+        "Started initial sync",
+        extra={
+            "user_id": user_id,
+            "artists": len(artist_ids),
+            "tracks": len(track_ids),
+            "total_tasks": len(artist_tasks) + len(track_tasks),
+        }
+    )
 
 
 # ============================================================
@@ -323,14 +359,27 @@ def _process_artist_tags(artist_id: int) -> None:
             logger.warning(f"⚠️ Tag {idx} has no name, skipping")
             continue
 
-        try:
-            count = int(raw.get("count"))
-            weight = min(count / 100.0, 1.0)
-            logger.info(f"✅ Tag '{name}': count={count}, weight={weight}")
-        except (TypeError, ValueError) as e:
-            weight = max(0.1, 1.0 - idx * 0.1)
+        # Safe count extraction with default
+        count_raw = raw.get("count")
+
+        if count_raw is not None:
+            try:
+                count = int(count_raw)
+                weight = min(count / 100.0, 1.0)
+                logger.info(f"✅ Tag '{name}': count={count}, weight={weight:.3f}")
+            except (TypeError, ValueError) as e:
+                # Count exists but isn't valid
+                count = None
+                weight = max(0.1, 1.0 - idx * 0.1)
+                logger.warning(
+                    f"⚠️ Tag '{name}': invalid count '{count_raw}', "
+                    f"using fallback weight={weight:.3f}"
+                )
+        else:
+            # No count field at all
             count = None
-            logger.info(f"⚠️ Tag '{name}': no count, using fallback weight={weight}, error={e}")
+            weight = max(0.1, 1.0 - idx * 0.1)
+            logger.info(f"⚠️ Tag '{name}': no count field, using fallback weight={weight:.3f}")
 
         normalized = Tag.normalize(name)
         tag = get_cached_tag(normalized, name)
@@ -387,6 +436,9 @@ def _process_artist_tags(artist_id: int) -> None:
 # ============================================================
 
 def get_similar_artists(artist_id: int) -> None:
+    """
+    Fetch similar artists from Last.fm with quality filtering.
+    """
     artist = Artist.objects.filter(id=artist_id).first()
     if not artist:
         return
@@ -399,7 +451,6 @@ def get_similar_artists(artist_id: int) -> None:
     })
 
     if not data:
-        # lastfm_get zwraca None dla 404 lub błędów klienta
         return
 
     similar_items = data.get("similarartists", {}).get("artist")
@@ -411,6 +462,9 @@ def get_similar_artists(artist_id: int) -> None:
         )
         return
 
+    # Collect and sort by score to process best matches first
+    candidates = []
+
     for item in similar_items:
         name = item.get("name")
         if not name:
@@ -421,18 +475,49 @@ def get_similar_artists(artist_id: int) -> None:
         except (ValueError, TypeError):
             continue
 
-        if match <= 0:
+        # Add minimum quality threshold
+        if match < 0.2:
             continue
 
         images = item.get("image", [])
         image_url = images[-1].get("#text") if images else None
 
+        candidates.append({
+            "name": name,
+            "score": match,
+            "image_url": image_url,
+            "mbid": item.get("mbid"),
+        })
+
+    if not candidates:
+        logger.info(
+            "No qualifying similar artists",
+            extra={"artist": artist.name}
+        )
+        return
+
+    # Sort by score descending - process best matches first
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    # Limit to top 20 to reduce task queue bloat
+    candidates = candidates[:20]
+
+    logger.info(
+        "Queueing similar artists",
+        extra={
+            "artist": artist.name,
+            "count": len(candidates),
+            "top_score": candidates[0]["score"] if candidates else 0,
+        }
+    )
+
+    for candidate in candidates:
         process_similar_artist.delay(
             artist_id=artist.id,
-            similar_name=name,
-            score=match,
-            image_url=image_url,
-            mbid=item.get("mbid"),
+            similar_name=candidate["name"],
+            score=candidate["score"],
+            image_url=candidate["image_url"],
+            mbid=candidate["mbid"],
         )
 
 
@@ -482,20 +567,53 @@ def _process_similar_artist(
         image_url: str | None = None,
         mbid: str | None = None,
 ) -> None:
+    # QUALITY GATE (earliest)
+    score = max(0.0, min(float(score), 1.0))
+    if score < 0.3:  # Add minimum threshold
+        return
+
+    # CAPACITY GATE (before heavy queries)
+    MAX_LASTFM_SIMILAR_ARTISTS = 10
+    existing_count = ArtistSimilarity.objects.filter(
+        from_artist_id=artist_id,
+        source="lastfm",
+    ).count()
+
+    # Allow some overflow for race conditions
+    if existing_count >= MAX_LASTFM_SIMILAR_ARTISTS + 5:
+        return
+
     artist = Artist.objects.filter(id=artist_id).first()
     if not artist:
         return
 
+    logger.info(
+        "Processing similar artist",
+        extra={
+            "from_artist": artist.name,
+            "similar_artist": similar_name,
+            "score": score,
+        }
+    )
+
+    # Find or create similar artist
     similar_artist = Artist.objects.filter(name__iexact=similar_name).first()
 
     if not similar_artist:
+        # Only create stub for decent scores
+        if score < 0.4:
+            logger.info(
+                "Skipping artist stub creation for low score",
+                extra={"artist": similar_name, "score": score}
+            )
+            return
+
         similar_artist = Artist.objects.create(
             name=similar_name,
             image_url=image_url,
         )
 
-    score = max(0.0, min(float(score), 1.0))
-
+    # Save similarity
     ArtistSimilarity.objects.update_or_create(
         from_artist=artist,
         to_artist=similar_artist,
@@ -508,6 +626,65 @@ def _process_similar_artist(
         },
     )
 
+    # PRUNE to keep only top K
+    _keep_top_k_artist_similarities(
+        artist_id=artist_id,
+        source="lastfm",
+        k=MAX_LASTFM_SIMILAR_ARTISTS
+    )
+
+    logger.info(
+        "Created artist similarity",
+        extra={
+            "from": artist.name,
+            "to": similar_artist.name,
+            "score": score,
+        }
+    )
+
+
+def _keep_top_k_artist_similarities(artist_id: int, source: str, k: int):
+    """
+    Keep only top K artist similarities by score, delete rest.
+    Optimized to avoid loading all IDs into memory unnecessarily.
+    """
+    # Fast check: count first (single lightweight query)
+    total_count = ArtistSimilarity.objects.filter(
+        from_artist_id=artist_id,
+        source=source
+    ).count()
+
+    if total_count <= k:
+        # Nothing to prune, exit early
+        return
+
+    # Get IDs of top K similarities (only what we need to keep)
+    to_keep = list(
+        ArtistSimilarity.objects.filter(
+            from_artist_id=artist_id,
+            source=source
+        )
+        .order_by('-score')
+        .values_list('id', flat=True)[:k]  # LIMIT k in database
+    )
+
+    # Delete everything else in one query
+    deleted_count = ArtistSimilarity.objects.filter(
+        from_artist_id=artist_id,
+        source=source
+    ).exclude(id__in=to_keep).delete()[0]
+
+    if deleted_count > 0:
+        logger.info(
+            f"Pruned {deleted_count} excess artist similarities",
+            extra={
+                "artist_id": artist_id,
+                "source": source,
+                "kept": k,
+                "deleted": deleted_count,
+                "total_before": total_count,
+            }
+        )
 
 # ============================================================
 # TRACKS
@@ -627,9 +804,10 @@ def _fetch_track_info(track_id: int):
 def get_similar_track_task(track_id: int) -> None:
     get_similar_tracks(track_id)
 
-
 def get_similar_tracks(track_id: int) -> None:
-    """Pobiera podobne utwory z Last.fm"""
+    """
+    Fetch similar tracks from Last.fm with quality filtering and prioritization.
+    """
     try:
         track = (
             Track.objects
@@ -658,7 +836,6 @@ def get_similar_tracks(track_id: int) -> None:
 
     data = lastfm_get(params)
     if not data:
-        # lastfm_get zwraca None dla 404 lub błędów klienta
         logger.info(
             "No similar tracks data from Last.fm",
             extra={"track_id": track_id, "params": params}
@@ -670,6 +847,9 @@ def get_similar_tracks(track_id: int) -> None:
         logger.info("No similar tracks found", extra={"track_id": track_id})
         return
 
+    # Collect and filter candidates
+    candidates = []
+
     for item in similar_items:
         name = item.get("name")
         if not name:
@@ -680,10 +860,11 @@ def get_similar_tracks(track_id: int) -> None:
         except (ValueError, TypeError):
             continue
 
-        if match <= 0:
+        # Quality threshold
+        if match < 0.25:
             continue
 
-        # Extract artist info from response
+        # Extract artist info
         artist_data = item.get("artist")
         artist_name = None
 
@@ -695,16 +876,46 @@ def get_similar_tracks(track_id: int) -> None:
         images = item.get("image", [])
         image_url = images[-1].get("#text") if images else None
 
-        # Pass artist_name to processing task
+        candidates.append({
+            "name": name,
+            "artist_name": artist_name,
+            "score": match,
+            "image_url": image_url,
+            "mbid": item.get("mbid"),
+        })
+
+    if not candidates:
+        logger.info(
+            "No qualifying similar tracks",
+            extra={"track_id": track_id}
+        )
+        return
+
+    # Sort by score descending
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    # Limit to top 25 to reduce queue bloat
+    candidates = candidates[:25]
+
+    logger.info(
+        "Queueing similar tracks",
+        extra={
+            "track_id": track_id,
+            "track": track.name,
+            "count": len(candidates),
+            "top_score": candidates[0]["score"] if candidates else 0,
+        }
+    )
+
+    for candidate in candidates:
         process_similar_track.delay(
             track_id=track.id,
-            similar_name=name,
-            similar_artist_name=artist_name,
-            score=match,
-            image_url=image_url,
-            mbid=item.get("mbid"),
+            similar_name=candidate["name"],
+            similar_artist_name=candidate["artist_name"],
+            score=candidate["score"],
+            image_url=candidate["image_url"],
+            mbid=candidate["mbid"],
         )
-
 
 @shared_task(
     autoretry_for=(Exception,),
@@ -750,65 +961,59 @@ def _process_similar_track(
         image_url: str | None = None,
         mbid: str | None = None,
 ) -> None:
+
+    score = max(0.0, min(float(score), 1.0))
+    if score < 0.3:
+        return
+
+    MAX_LASTFM_SIMILAR = 10
+    existing_count = TrackSimilarity.objects.filter(
+        from_track_id=track_id,
+        source="lastfm",
+    ).count()
+
+    # Allow some overflow for race conditions, will prune later
+    if existing_count >= MAX_LASTFM_SIMILAR + 5:  # Hard limit
+        return
+
     track = Track.objects.filter(id=track_id).first()
     if not track:
         return
-
     logger.info(
         "Processing similar track",
         extra={
             "from_track": track.name,
             "similar_track": similar_name,
             "artist": similar_artist_name,
-            "mbid": mbid,
+            "score": score,
         }
     )
+
 
     similar_track = None
 
     if mbid:
-        similar_track = (
-            Track.objects
-            .filter(lastfm_cache__mbid=mbid)
-            .select_related("lastfm_cache")
-            .first()
-        )
+        similar_track = Track.objects.filter(
+            lastfm_cache__mbid=mbid
+        ).select_related("lastfm_cache").first()
 
-    # 2️⃣ Name + artist (soft match)
     if not similar_track and similar_artist_name:
-        candidates = (
-            Track.objects
-            .filter(name__iexact=similar_name)
-            .prefetch_related("artists")
-        )
+        candidates = Track.objects.filter(
+            name__iexact=similar_name
+        ).prefetch_related("artists")
 
         for candidate in candidates:
             artist = candidate.artists.first()
-            if artist and artist_names_compatible(
-                    artist.name,
-                    similar_artist_name
-            ):
+            if artist and artist_names_compatible(artist.name, similar_artist_name):
                 similar_track = candidate
                 break
 
-    # 3️⃣ Name-only fallback (VERY soft)
-    if not similar_track:
-        similar_track = (
-            Track.objects
-            .filter(name__iexact=similar_name)
-            .first()
-        )
+    if not similar_track and score >= 0.6:  # Raised from 0.5
+        similar_track = Track.objects.filter(name__iexact=similar_name).first()
 
-    # 4️⃣ CREATE — NORMAL & EXPECTED PATH
     if not similar_track:
-        logger.info(
-            "Creating similar track from Last.fm",
-            extra={
-                "track": similar_name,
-                "artist": similar_artist_name,
-                "mbid": mbid,
-            }
-        )
+        if score < 0.6:  # Raised from 0.4
+            return
 
         similar_track = _create_track_from_lastfm(
             track_name=similar_name,
@@ -818,16 +1023,8 @@ def _process_similar_track(
         )
 
         if not similar_track:
-            logger.warning(
-                "Failed to create similar track",
-                extra={"track": similar_name}
-            )
             return
 
-    # 5️⃣ Clamp score
-    score = max(0.0, min(float(score), 1.0))
-
-    # 6️⃣ Save similarity (idempotent)
     TrackSimilarity.objects.update_or_create(
         from_track=track,
         to_track=similar_track,
@@ -840,6 +1037,8 @@ def _process_similar_track(
             },
         },
     )
+
+    _keep_top_k_similarities(track_id, source="lastfm", k=MAX_LASTFM_SIMILAR)
 
     logger.info(
         "Created track similarity",
@@ -854,6 +1053,44 @@ def _process_similar_track(
             "score": score,
         }
     )
+
+
+def _keep_top_k_similarities(track_id: int, source: str, k: int):
+    """Keep only top K track similarities by score"""
+    # Get count first (cheap query)
+    total_count = TrackSimilarity.objects.filter(
+        from_track_id=track_id,
+        source=source
+    ).count()
+
+    if total_count <= k:
+        return
+
+    # Get IDs to keep
+    to_keep = list(
+        TrackSimilarity.objects.filter(
+            from_track_id=track_id,
+            source=source
+        ).order_by('-score')
+        .values_list('id', flat=True)[:k]
+    )
+
+    # Delete everything else
+    deleted_count = TrackSimilarity.objects.filter(
+        from_track_id=track_id,
+        source=source
+    ).exclude(id__in=to_keep).delete()[0]
+
+    if deleted_count > 0:
+        logger.info(
+            f"Pruned {deleted_count} excess track similarities",
+            extra={
+                "track_id": track_id,
+                "source": source,
+                "kept": k,
+                "deleted": deleted_count
+            }
+        )
 
 
 def _create_track_from_lastfm(
@@ -1038,11 +1275,10 @@ def artist_names_compatible(a: str, b: str) -> bool:
 
 def compute_track_tag_similarity(track: Track, max_candidates=1000):
     """
-    ZOPTYMALIZOWANA wersja:
-    1. Pobiera tylko tracki mające wspólne tagi
-    2. Limituje liczbę kandydatów
-    3. Batch operations
+    Compute tag-based similarities with TOP-K limiting.
     """
+    MAX_TAG_SIMILARITIES = 20  # Hard limit on similarities created
+
     track_tags = {
         tt.tag_id: tt.weight
         for tt in track.track_tags.filter(is_active=True)
@@ -1052,21 +1288,26 @@ def compute_track_tag_similarity(track: Track, max_candidates=1000):
         return
 
     tag_ids = list(track_tags.keys())
+
+    # Get candidate tracks that share tags
     candidate_ids = (
         TrackTag.objects
         .filter(tag_id__in=tag_ids, is_active=True)
         .exclude(track_id=track.id)
         .values_list('track_id', flat=True)
-        .distinct()[:max_candidates]  # LIMIT!
+        .distinct()[:max_candidates]
     )
 
     if not candidate_ids:
         return
 
-    #  Batch prefetch
-    candidates = Track.objects.filter(id__in=candidate_ids).prefetch_related('track_tags')
+    candidates = Track.objects.filter(
+        id__in=candidate_ids
+    ).prefetch_related('track_tags')
 
-    similarities_to_create = []
+    # Use a heap to keep only top K similarities
+    # Format: (score, track_id, other_track, score_breakdown)
+    top_k_heap = []
 
     for other in candidates:
         other_tags = {
@@ -1083,25 +1324,58 @@ def compute_track_tag_similarity(track: Track, max_candidates=1000):
         if score < 0.3:
             continue
 
-        similarities_to_create.append(
-            TrackSimilarity(
-                from_track=track,
-                to_track=other,
-                source="tags",
-                score=min(score, 1.0),
-                score_breakdown={
-                    "common_tags": len(common),
-                },
-            )
-        )
+        score = min(score, 1.0)
 
-    if similarities_to_create:
+        # Use heap to keep only top K
+        if len(top_k_heap) < MAX_TAG_SIMILARITIES:
+            heapq.heappush(
+                top_k_heap,
+                (score, other.id, other, {"common_tags": len(common)})
+            )
+        elif score > top_k_heap[0][0]:  # Better than worst in heap
+            heapq.heapreplace(
+                top_k_heap,
+                (score, other.id, other, {"common_tags": len(common)})
+            )
+
+    if not top_k_heap:
+        # Clean up old similarities if no new ones
         TrackSimilarity.objects.filter(
             from_track=track,
             source="tags"
         ).delete()
+        return
 
-        TrackSimilarity.objects.bulk_create(
-            similarities_to_create,
-            ignore_conflicts=True
+    # Build similarities from heap
+    similarities_to_create = [
+        TrackSimilarity(
+            from_track=track,
+            to_track=other_track,
+            source="tags",
+            score=score,
+            score_breakdown=breakdown,
         )
+        for score, _, other_track, breakdown in top_k_heap
+    ]
+
+    # Delete old similarities and create new ones
+    TrackSimilarity.objects.filter(
+        from_track=track,
+        source="tags"
+    ).delete()
+
+    TrackSimilarity.objects.bulk_create(
+        similarities_to_create,
+        ignore_conflicts=True
+    )
+
+    logger.info(
+        "Computed tag-based track similarities",
+        extra={
+            "track_id": track.id,
+            "candidates_checked": len(candidate_ids),
+            "similarities_created": len(similarities_to_create),
+            "avg_score": sum(s.score for s in similarities_to_create) / len(
+                similarities_to_create) if similarities_to_create else 0,
+        },
+    )
