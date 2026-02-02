@@ -735,9 +735,10 @@ def _fetch_track_info(track_id: int):
 def get_similar_track_task(track_id: int) -> None:
     get_similar_tracks(track_id)
 
-
 def get_similar_tracks(track_id: int) -> None:
-    """Pobiera podobne utwory z Last.fm"""
+    """
+    Fetch similar tracks from Last.fm with quality filtering and prioritization.
+    """
     try:
         track = (
             Track.objects
@@ -766,7 +767,6 @@ def get_similar_tracks(track_id: int) -> None:
 
     data = lastfm_get(params)
     if not data:
-        # lastfm_get zwraca None dla 404 lub błędów klienta
         logger.info(
             "No similar tracks data from Last.fm",
             extra={"track_id": track_id, "params": params}
@@ -778,6 +778,9 @@ def get_similar_tracks(track_id: int) -> None:
         logger.info("No similar tracks found", extra={"track_id": track_id})
         return
 
+    # Collect and filter candidates
+    candidates = []
+
     for item in similar_items:
         name = item.get("name")
         if not name:
@@ -788,10 +791,11 @@ def get_similar_tracks(track_id: int) -> None:
         except (ValueError, TypeError):
             continue
 
-        if match <= 0:
+        # Quality threshold
+        if match < 0.25:
             continue
 
-        # Extract artist info from response
+        # Extract artist info
         artist_data = item.get("artist")
         artist_name = None
 
@@ -803,16 +807,46 @@ def get_similar_tracks(track_id: int) -> None:
         images = item.get("image", [])
         image_url = images[-1].get("#text") if images else None
 
-        # Pass artist_name to processing task
+        candidates.append({
+            "name": name,
+            "artist_name": artist_name,
+            "score": match,
+            "image_url": image_url,
+            "mbid": item.get("mbid"),
+        })
+
+    if not candidates:
+        logger.info(
+            "No qualifying similar tracks",
+            extra={"track_id": track_id}
+        )
+        return
+
+    # Sort by score descending
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    # Limit to top 25 to reduce queue bloat
+    candidates = candidates[:25]
+
+    logger.info(
+        "Queueing similar tracks",
+        extra={
+            "track_id": track_id,
+            "track": track.name,
+            "count": len(candidates),
+            "top_score": candidates[0]["score"] if candidates else 0,
+        }
+    )
+
+    for candidate in candidates:
         process_similar_track.delay(
             track_id=track.id,
-            similar_name=name,
-            similar_artist_name=artist_name,
-            score=match,
-            image_url=image_url,
-            mbid=item.get("mbid"),
+            similar_name=candidate["name"],
+            similar_artist_name=candidate["artist_name"],
+            score=candidate["score"],
+            image_url=candidate["image_url"],
+            mbid=candidate["mbid"],
         )
-
 
 @shared_task(
     autoretry_for=(Exception,),
