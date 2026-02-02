@@ -27,8 +27,6 @@ logger = logging.getLogger(__name__)
 
 LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
 LASTFM_DAYS_TTL = 30
-TOP_K = 10
-heap = []
 
 # ============================================================
 # HELPERS
@@ -596,16 +594,31 @@ def _process_similar_artist(
 
 
 def _keep_top_k_artist_similarities(artist_id: int, source: str, k: int):
-    """Keep only top K artist similarities by score"""
-    all_sims = list(ArtistSimilarity.objects.filter(
+    """
+    Keep only top K artist similarities by score, delete rest.
+    Optimized to avoid loading all IDs into memory unnecessarily.
+    """
+    # Fast check: count first (single lightweight query)
+    total_count = ArtistSimilarity.objects.filter(
         from_artist_id=artist_id,
         source=source
-    ).order_by('-score').values_list('id', flat=True))
+    ).count()
 
-    if len(all_sims) <= k:
+    if total_count <= k:
+        # Nothing to prune, exit early
         return
 
-    to_keep = all_sims[:k]
+    # Get IDs of top K similarities (only what we need to keep)
+    to_keep = list(
+        ArtistSimilarity.objects.filter(
+            from_artist_id=artist_id,
+            source=source
+        )
+        .order_by('-score')
+        .values_list('id', flat=True)[:k]  # LIMIT k in database
+    )
+
+    # Delete everything else in one query
     deleted_count = ArtistSimilarity.objects.filter(
         from_artist_id=artist_id,
         source=source
@@ -614,7 +627,13 @@ def _keep_top_k_artist_similarities(artist_id: int, source: str, k: int):
     if deleted_count > 0:
         logger.info(
             f"Pruned {deleted_count} excess artist similarities",
-            extra={"artist_id": artist_id, "kept": k}
+            extra={
+                "artist_id": artist_id,
+                "source": source,
+                "kept": k,
+                "deleted": deleted_count,
+                "total_before": total_count,
+            }
         )
 
 # ============================================================
@@ -910,8 +929,16 @@ def _process_similar_track(
     track = Track.objects.filter(id=track_id).first()
     if not track:
         return
+    logger.info(
+        "Processing similar track",
+        extra={
+            "from_track": track.name,
+            "similar_track": similar_name,
+            "artist": similar_artist_name,
+            "score": score,
+        }
+    )
 
-    logger.info("Processing similar track", extra={...})
 
     similar_track = None
 
@@ -963,27 +990,58 @@ def _process_similar_track(
 
     _keep_top_k_similarities(track_id, source="lastfm", k=MAX_LASTFM_SIMILAR)
 
-    logger.info("Created track similarity", extra={...})
+    logger.info(
+        "Created track similarity",
+        extra={
+            "from": track.name,
+            "to": similar_track.name,
+            "artist": (
+                similar_track.artists.first().name
+                if similar_track.artists.exists()
+                else None
+            ),
+            "score": score,
+        }
+    )
 
 
 def _keep_top_k_similarities(track_id: int, source: str, k: int):
-    """Keep only top K similarities by score, delete rest"""
-    all_sims = list(TrackSimilarity.objects.filter(
+    """Keep only top K track similarities by score"""
+    # Get count first (cheap query)
+    total_count = TrackSimilarity.objects.filter(
         from_track_id=track_id,
         source=source
-    ).order_by('-score').values_list('id', flat=True))
+    ).count()
 
-    if len(all_sims) <= k:
+    if total_count <= k:
         return
 
-    to_keep = all_sims[:k]
-    TrackSimilarity.objects.filter(
+    # Get IDs to keep
+    to_keep = list(
+        TrackSimilarity.objects.filter(
+            from_track_id=track_id,
+            source=source
+        ).order_by('-score')
+        .values_list('id', flat=True)[:k]
+    )
+
+    # Delete everything else
+    deleted_count = TrackSimilarity.objects.filter(
         from_track_id=track_id,
         source=source
-    ).exclude(id__in=to_keep).delete()
+    ).exclude(id__in=to_keep).delete()[0]
 
-    logger.info(f"Pruned {len(all_sims) - k} excess similarities",
-                extra={"track_id": track_id, "kept": k})
+    if deleted_count > 0:
+        logger.info(
+            f"Pruned {deleted_count} excess track similarities",
+            extra={
+                "track_id": track_id,
+                "source": source,
+                "kept": k,
+                "deleted": deleted_count
+            }
+        )
+
 
 def _create_track_from_lastfm(
         track_name: str,
