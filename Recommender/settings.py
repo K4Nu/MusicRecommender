@@ -49,6 +49,7 @@ INSTALLED_APPS = [
 
     # Local apps
     'users',
+    'recomendations',
 ]
 
 SITE_ID = 1
