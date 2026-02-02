@@ -322,14 +322,27 @@ def _process_artist_tags(artist_id: int) -> None:
             logger.warning(f"⚠️ Tag {idx} has no name, skipping")
             continue
 
-        try:
-            count = int(raw.get("count"))
-            weight = min(count / 100.0, 1.0)
-            logger.info(f"✅ Tag '{name}': count={count}, weight={weight}")
-        except (TypeError, ValueError) as e:
-            weight = max(0.1, 1.0 - idx * 0.1)
+        # Safe count extraction with default
+        count_raw = raw.get("count")
+
+        if count_raw is not None:
+            try:
+                count = int(count_raw)
+                weight = min(count / 100.0, 1.0)
+                logger.info(f"✅ Tag '{name}': count={count}, weight={weight:.3f}")
+            except (TypeError, ValueError) as e:
+                # Count exists but isn't valid
+                count = None
+                weight = max(0.1, 1.0 - idx * 0.1)
+                logger.warning(
+                    f"⚠️ Tag '{name}': invalid count '{count_raw}', "
+                    f"using fallback weight={weight:.3f}"
+                )
+        else:
+            # No count field at all
             count = None
-            logger.info(f"⚠️ Tag '{name}': no count, using fallback weight={weight}, error={e}")
+            weight = max(0.1, 1.0 - idx * 0.1)
+            logger.info(f"⚠️ Tag '{name}': no count field, using fallback weight={weight:.3f}")
 
         normalized = Tag.normalize(name)
         tag = get_cached_tag(normalized, name)
