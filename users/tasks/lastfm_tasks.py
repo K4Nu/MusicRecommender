@@ -483,20 +483,53 @@ def _process_similar_artist(
         image_url: str | None = None,
         mbid: str | None = None,
 ) -> None:
+    # QUALITY GATE (earliest)
+    score = max(0.0, min(float(score), 1.0))
+    if score < 0.3:  # Add minimum threshold
+        return
+
+    # CAPACITY GATE (before heavy queries)
+    MAX_LASTFM_SIMILAR_ARTISTS = 10
+    existing_count = ArtistSimilarity.objects.filter(
+        from_artist_id=artist_id,
+        source="lastfm",
+    ).count()
+
+    # Allow some overflow for race conditions
+    if existing_count >= MAX_LASTFM_SIMILAR_ARTISTS + 5:
+        return
+
     artist = Artist.objects.filter(id=artist_id).first()
     if not artist:
         return
 
+    logger.info(
+        "Processing similar artist",
+        extra={
+            "from_artist": artist.name,
+            "similar_artist": similar_name,
+            "score": score,
+        }
+    )
+
+    # Find or create similar artist
     similar_artist = Artist.objects.filter(name__iexact=similar_name).first()
 
     if not similar_artist:
+        # Only create stub for decent scores
+        if score < 0.4:
+            logger.info(
+                "Skipping artist stub creation for low score",
+                extra={"artist": similar_name, "score": score}
+            )
+            return
+
         similar_artist = Artist.objects.create(
             name=similar_name,
             image_url=image_url,
         )
 
-    score = max(0.0, min(float(score), 1.0))
-
+    # Save similarity
     ArtistSimilarity.objects.update_or_create(
         from_artist=artist,
         to_artist=similar_artist,
@@ -509,6 +542,44 @@ def _process_similar_artist(
         },
     )
 
+    # PRUNE to keep only top K
+    _keep_top_k_artist_similarities(
+        artist_id=artist_id,
+        source="lastfm",
+        k=MAX_LASTFM_SIMILAR_ARTISTS
+    )
+
+    logger.info(
+        "Created artist similarity",
+        extra={
+            "from": artist.name,
+            "to": similar_artist.name,
+            "score": score,
+        }
+    )
+
+
+def _keep_top_k_artist_similarities(artist_id: int, source: str, k: int):
+    """Keep only top K artist similarities by score"""
+    all_sims = list(ArtistSimilarity.objects.filter(
+        from_artist_id=artist_id,
+        source=source
+    ).order_by('-score').values_list('id', flat=True))
+
+    if len(all_sims) <= k:
+        return
+
+    to_keep = all_sims[:k]
+    deleted_count = ArtistSimilarity.objects.filter(
+        from_artist_id=artist_id,
+        source=source
+    ).exclude(id__in=to_keep).delete()[0]
+
+    if deleted_count > 0:
+        logger.info(
+            f"Pruned {deleted_count} excess artist similarities",
+            extra={"artist_id": artist_id, "kept": k}
+        )
 
 # ============================================================
 # TRACKS
