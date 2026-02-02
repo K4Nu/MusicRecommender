@@ -388,6 +388,9 @@ def _process_artist_tags(artist_id: int) -> None:
 # ============================================================
 
 def get_similar_artists(artist_id: int) -> None:
+    """
+    Fetch similar artists from Last.fm with quality filtering.
+    """
     artist = Artist.objects.filter(id=artist_id).first()
     if not artist:
         return
@@ -400,7 +403,6 @@ def get_similar_artists(artist_id: int) -> None:
     })
 
     if not data:
-        # lastfm_get zwraca None dla 404 lub błędów klienta
         return
 
     similar_items = data.get("similarartists", {}).get("artist")
@@ -412,6 +414,9 @@ def get_similar_artists(artist_id: int) -> None:
         )
         return
 
+    # Collect and sort by score to process best matches first
+    candidates = []
+
     for item in similar_items:
         name = item.get("name")
         if not name:
@@ -422,18 +427,49 @@ def get_similar_artists(artist_id: int) -> None:
         except (ValueError, TypeError):
             continue
 
-        if match <= 0:
+        # Add minimum quality threshold
+        if match < 0.2:
             continue
 
         images = item.get("image", [])
         image_url = images[-1].get("#text") if images else None
 
+        candidates.append({
+            "name": name,
+            "score": match,
+            "image_url": image_url,
+            "mbid": item.get("mbid"),
+        })
+
+    if not candidates:
+        logger.info(
+            "No qualifying similar artists",
+            extra={"artist": artist.name}
+        )
+        return
+
+    # Sort by score descending - process best matches first
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    # Limit to top 20 to reduce task queue bloat
+    candidates = candidates[:20]
+
+    logger.info(
+        "Queueing similar artists",
+        extra={
+            "artist": artist.name,
+            "count": len(candidates),
+            "top_score": candidates[0]["score"] if candidates else 0,
+        }
+    )
+
+    for candidate in candidates:
         process_similar_artist.delay(
             artist_id=artist.id,
-            similar_name=name,
-            score=match,
-            image_url=image_url,
-            mbid=item.get("mbid"),
+            similar_name=candidate["name"],
+            score=candidate["score"],
+            image_url=candidate["image_url"],
+            mbid=candidate["mbid"],
         )
 
 
