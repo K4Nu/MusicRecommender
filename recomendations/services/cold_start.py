@@ -141,20 +141,18 @@ def ingest_artists(artist_ids, headers):
     return artists
 
 def ingest_album(album_data: dict, primary_artist: Artist) -> Album:
-    """
-    Create or fetch album and attach primary artist.
-    Celery-safe, idempotent.
-    """
+    release_date = parse_spotify_release_date(album_data)
+
     try:
         with transaction.atomic():
-            album, created = Album.objects.get_or_create(
+            album, _ = Album.objects.get_or_create(
                 spotify_id=album_data["id"],
                 defaults={
                     "name": album_data["name"],
                     "album_type": album_data.get(
                         "album_type", Album.AlbumTypes.ALBUM
                     ),
-                    "release_date": album_data.get("release_date"),
+                    "release_date": release_date,
                     "image_url": (
                         album_data["images"][0]["url"]
                         if album_data.get("images")
@@ -163,13 +161,9 @@ def ingest_album(album_data: dict, primary_artist: Artist) -> Album:
                 },
             )
     except IntegrityError:
-        # someone else created it concurrently
         album = Album.objects.get(spotify_id=album_data["id"])
-        created = False
 
-    # attach artist outside critical section
     album.artists.add(primary_artist)
-
     return album
 
 def ingest_track(track_data: dict, album: Album, artists: list[Artist]) -> Track:
@@ -203,3 +197,32 @@ def ingest_track(track_data: dict, album: Album, artists: list[Artist]) -> Track
 
     return track
 
+# ============================================================
+# SPOTIFY HELPERS
+# ============================================================
+def parse_spotify_release_date(album_data: dict) -> date | None:
+    release_date = album_data.get("release_date")
+    precision = album_data.get("release_date_precision")
+
+    if not release_date:
+        return None
+
+    try:
+        if precision == "day":
+            # YYYY-MM-DD
+            year, month, day = map(int, release_date.split("-"))
+            return date(year, month, day)
+
+        if precision == "month":
+            # YYYY-MM → first day of month
+            year, month = map(int, release_date.split("-"))
+            return date(year, month, 1)
+
+        if precision == "year":
+            # YYYY → Jan 1
+            return date(int(release_date), 1, 1)
+
+    except Exception:
+        return None
+
+    return None
