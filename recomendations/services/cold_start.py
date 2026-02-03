@@ -95,3 +95,46 @@ def cold_start_fetch_lastfm_global():
 
 def cold_start_finalize(*args, **kwargs):
     pass
+
+# ============================================================
+# INGEST TASKS FOR SPOTIFY
+# ============================================================
+def ingest_artists(artist_ids, headers):
+    artists = []
+
+    for artist_id in artist_ids:
+        try:
+            artist, created = Artist.objects.get_or_create(
+                spotify_id=artist_id,
+                defaults={"name": "Unknown"},
+            )
+        except IntegrityError:
+            # ktoś inny stworzył równolegle
+            artist = Artist.objects.get(spotify_id=artist_id)
+            created = False
+
+        # fetch danych POZA transakcją
+        if created or not artist.image_url:
+            resp = requests.get(
+                f"https://api.spotify.com/v1/artists/{artist_id}",
+                headers=headers,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            update_fields = []
+            if artist.name != data["name"]:
+                artist.name = data["name"]
+                update_fields.append("name")
+
+            if data.get("images"):
+                artist.image_url = data["images"][0]["url"]
+                update_fields.append("image_url")
+
+            if update_fields:
+                artist.save(update_fields=update_fields)
+
+        artists.append(artist)
+
+    return artists
