@@ -9,6 +9,7 @@ from datetime import date
 from recomendations.models import Recommendation, RecommendationItem, ColdStartTrack
 from utils.locks import ResourceLock, ResourceLockedException
 from users.tasks.spotify_tasks import save_tracks_bulk
+import os
 
 User = get_user_model()
 logger=logging.getLogger(__name__)
@@ -18,7 +19,6 @@ def cold_start_refresh_all():
     """Orchestrator: fetch all playlists in parallel, then finalize."""
     chord([
         cold_start_fetch_spotify_global.s(),
-        cold_start_fetch_spotify_viral.s(),
         # cold_start_fetch_lastfm_global.s(),  # later
     ])(cold_start_finalize.s())
 
@@ -66,10 +66,8 @@ def cold_start_fetch_spotify_global(self):
                 logger.warning("Spotify GLOBAL returned no tracks")
                 return
 
-            # 🔥 JEDYNY INGEST
             tracks_cache = save_tracks_bulk(tracks_data)
 
-            # 🧊 FACT TABLE
             for rank, track_data in enumerate(tracks_data, start=1):
                 track = tracks_cache.get(track_data["id"])
                 if not track:
@@ -92,8 +90,6 @@ def cold_start_fetch_spotify_global(self):
     except ResourceLockedException:
         logger.info("Spotify GLOBAL cold start already running – skipped")
 
-def cold_start_fetch_spotify_viral():
-    pass
 
 def cold_start_fetch_lastfm_global():
     pass
@@ -101,3 +97,19 @@ def cold_start_fetch_lastfm_global():
 def cold_start_finalize(*args, **kwargs):
     pass
 
+"""
+LastFM helpers
+"""
+def fetch_lastfm_top_artists(limit=100):
+    resp = requests.get(
+        "https://ws.audioscrobbler.com/2.0/",
+        params={
+            "method": "chart.gettopartists",
+            "api_key": os.environ.get("LASTFM_API_KEY"),
+            "format": "json",
+            "limit": limit,
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()["artists"]["artist"]
