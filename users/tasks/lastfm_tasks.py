@@ -214,7 +214,7 @@ def lastfm_initial_sync(user_id: int) -> None:
 # ORCHESTRATION – USER TOP ARTISTS
 # ============================================================
 @shared_task
-def sync_end():
+def sync_end(*args, **kwargs):
     logger.info("Sync finished")
     return
 
