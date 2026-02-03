@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from users.services import ensure_spotify_token
 from users.models import Track,Album,Artist
 from django.db import transaction, IntegrityError
+from datetime import date
 
 User = get_user_model()
 logger=logging.getLogger(__name__)
@@ -78,8 +79,8 @@ def cold_start_process_track(self, track_id, rank):
     # Process in order: artists → album → track
     artist_ids = [a["id"] for a in track_data["artists"]]
     artists = ingest_artists(artist_ids, headers)
-    album = ingest_album(track_data["album"], artists[0].id, headers)
-    track = ingest_track(track_data, album.id, [a.id for a in artists])
+    album = ingest_album(track_data["album"], artists[0])
+    track = ingest_track(track_data, album, artists)
 
     logger.info(
         "#%s %s – %s (%s artists, preview=%s)",
@@ -170,3 +171,35 @@ def ingest_album(album_data: dict, primary_artist: Artist) -> Album:
     album.artists.add(primary_artist)
 
     return album
+
+def ingest_track(track_data: dict, album: Album, artists: list[Artist]) -> Track:
+    """
+    Create or fetch track and attach all artists.
+    Celery-safe, idempotent.
+    """
+    try:
+        with transaction.atomic():
+            track, created = Track.objects.get_or_create(
+                spotify_id=track_data["id"],
+                defaults={
+                    "name": track_data["name"],
+                    "album": album,
+                    "duration_ms": track_data["duration_ms"],
+                    "popularity": track_data.get("popularity"),
+                    "preview_url": track_data.get("preview_url"),
+                    "preview_type": (
+                        "audio" if track_data.get("preview_url") else "embed"
+                    ),
+                    "image_url": album.image_url,
+                },
+            )
+    except IntegrityError:
+        # someone else created it concurrently
+        track = Track.objects.get(spotify_id=track_data["id"])
+        created = False
+
+    # Attach artists outside transaction
+    track.artists.add(*artists)
+
+    return track
+

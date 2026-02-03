@@ -8,7 +8,7 @@ class ColdTest(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self,request):
-        cold_start_fetch_spotify_global()
+        cold_start_fetch_spotify_global.delay()
         return Response(
             {"message": "Cold start"},
             status=status.HTTP_200_OK
