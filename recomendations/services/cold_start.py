@@ -1,24 +1,140 @@
 from celery import chain, chord, shared_task
 import logging
+import requests
+from django.contrib.auth import get_user_model
+from users.services import ensure_spotify_token
+from users.models import Track,Album,Artist
+from django.db import transaction, IntegrityError
 
+User = get_user_model()
 logger=logging.getLogger(__name__)
 
-def cold_start_refresh_all():
-    cold_start_fetch_spotify_global()
-    cold_start_fetch_spotify_viral()
-    cold_start_fetch_lastfm_global()
-    cold_start_finalize()
-
 @shared_task
-def cold_start_finalize():
-    logger.info('cold_start_finalize')
-    return
+def cold_start_refresh_all():
+    """Orchestrator: fetch all playlists in parallel, then finalize."""
+    chord([
+        cold_start_fetch_spotify_global.s(),
+        cold_start_fetch_spotify_viral.s(),
+        cold_start_fetch_lastfm_global.s(),
+    ])(cold_start_finalize.s())
 
-def cold_start_fetch_spotify_global():
-    pass
+logger = logging.getLogger(__name__)
+User = get_user_model()
+
+
+@shared_task(bind=True, autoretry_for=(requests.RequestException,), retry_backoff=10, max_retries=3)
+def cold_start_fetch_spotify_global(self):
+    logger.info("Cold start Spotify global – started")
+
+    user = User.objects.get(email="adam@onet.pl")
+    token = ensure_spotify_token(user)
+
+    headers = {"Authorization": f"Bearer {token.access_token}"}
+
+    playlist_id = "5ABHKGoOzxkaa28ttQV9sE"
+    url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
+
+    resp = requests.get(
+        url,
+        headers=headers,
+        params={"limit": 50, "market": "US"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+
+    items = resp.json().get("items", [])
+    logger.info("Fetched %s playlist items", len(items))
+
+    for rank, item in enumerate(items, start=1):
+        track = item.get("track")
+        if not track or track.get("is_local"):
+            continue
+
+        track_id = track.get("id")
+        if track_id:
+            cold_start_process_track.delay(track_id, rank)
+
+    logger.info("Cold start Spotify global – fanout done")
+
+
+@shared_task(bind=True, autoretry_for=(requests.RequestException,), retry_backoff=5, max_retries=3)
+def cold_start_process_track(self, track_id, rank):
+    """Orchestrator: coordinates artist → album → track ingestion."""
+
+    # Fetch track data once
+    user = User.objects.get(email="adam@onet.pl")
+    token = ensure_spotify_token(user)
+    headers = {"Authorization": f"Bearer {token.access_token}"}
+
+    resp = requests.get(
+        f"https://api.spotify.com/v1/tracks/{track_id}",
+        headers=headers,
+        params={"market": "US"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    track_data = resp.json()
+
+    # Process in order: artists → album → track
+    artist_ids = [a["id"] for a in track_data["artists"]]
+    artists = ingest_artists(artist_ids, headers)
+    album = ingest_album(track_data["album"], artists[0].id, headers)
+    track = ingest_track(track_data, album.id, [a.id for a in artists])
+
+    logger.info(
+        "#%s %s – %s (%s artists, preview=%s)",
+        rank, track.name, artists[0].name, len(artists), bool(track.preview_url)
+    )
+
 
 def cold_start_fetch_spotify_viral():
     pass
 
 def cold_start_fetch_lastfm_global():
     pass
+
+def cold_start_finalize(*args, **kwargs):
+    pass
+
+# ============================================================
+# INGEST TASKS FOR SPOTIFY
+# ============================================================
+def ingest_artists(artist_ids, headers):
+    artists = []
+
+    for artist_id in artist_ids:
+        try:
+            artist, created = Artist.objects.get_or_create(
+                spotify_id=artist_id,
+                defaults={"name": "Unknown"},
+            )
+        except IntegrityError:
+            # ktoś inny stworzył równolegle
+            artist = Artist.objects.get(spotify_id=artist_id)
+            created = False
+
+        # fetch danych POZA transakcją
+        if created or not artist.image_url:
+            resp = requests.get(
+                f"https://api.spotify.com/v1/artists/{artist_id}",
+                headers=headers,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            update_fields = []
+            if artist.name != data["name"]:
+                artist.name = data["name"]
+                update_fields.append("name")
+
+            if data.get("images"):
+                artist.image_url = data["images"][0]["url"]
+                update_fields.append("image_url")
+
+            if update_fields:
+                artist.save(update_fields=update_fields)
+
+        artists.append(artist)
+
+    return artists
