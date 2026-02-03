@@ -6,6 +6,8 @@ from users.services import ensure_spotify_token
 from users.models import Track,Album,Artist
 from django.db import transaction, IntegrityError
 from datetime import date
+from recomendations.models import Recommendation, RecommendationItem, ColdStartTrack
+
 
 User = get_user_model()
 logger=logging.getLogger(__name__)
@@ -60,9 +62,6 @@ def cold_start_fetch_spotify_global(self):
 
 @shared_task(bind=True, autoretry_for=(requests.RequestException,), retry_backoff=5, max_retries=3)
 def cold_start_process_track(self, track_id, rank):
-    """Orchestrator: coordinates artist → album → track ingestion."""
-
-    # Fetch track data once
     user = User.objects.get(email="adam@onet.pl")
     token = ensure_spotify_token(user)
     headers = {"Authorization": f"Bearer {token.access_token}"}
@@ -74,19 +73,33 @@ def cold_start_process_track(self, track_id, rank):
         timeout=10,
     )
     resp.raise_for_status()
+
     track_data = resp.json()
 
-    # Process in order: artists → album → track
+    # ingest
     artist_ids = [a["id"] for a in track_data["artists"]]
     artists = ingest_artists(artist_ids, headers)
     album = ingest_album(track_data["album"], artists[0])
     track = ingest_track(track_data, album, artists)
 
-    logger.info(
-        "#%s %s – %s (%s artists, preview=%s)",
-        rank, track.name, artists[0].name, len(artists), bool(track.preview_url)
+    # FACT storage (cold start pool)
+    ColdStartTrack.objects.update_or_create(
+        track=track,
+        source=ColdStartTrack.Source.SPOTIFY_GLOBAL,
+        defaults={
+            "rank": rank,
+            "score": None,  # or simple rank-based score
+        },
     )
 
+    logger.info(
+        "Cold start track stored",
+        extra={
+            "track_id": track.spotify_id,
+            "rank": rank,
+            "source": "spotify_global",
+        },
+    )
 
 def cold_start_fetch_spotify_viral():
     pass
