@@ -138,3 +138,35 @@ def ingest_artists(artist_ids, headers):
         artists.append(artist)
 
     return artists
+
+def ingest_album(album_data: dict, primary_artist: Artist) -> Album:
+    """
+    Create or fetch album and attach primary artist.
+    Celery-safe, idempotent.
+    """
+    try:
+        with transaction.atomic():
+            album, created = Album.objects.get_or_create(
+                spotify_id=album_data["id"],
+                defaults={
+                    "name": album_data["name"],
+                    "album_type": album_data.get(
+                        "album_type", Album.AlbumTypes.ALBUM
+                    ),
+                    "release_date": album_data.get("release_date"),
+                    "image_url": (
+                        album_data["images"][0]["url"]
+                        if album_data.get("images")
+                        else None
+                    ),
+                },
+            )
+    except IntegrityError:
+        # someone else created it concurrently
+        album = Album.objects.get(spotify_id=album_data["id"])
+        created = False
+
+    # attach artist outside critical section
+    album.artists.add(primary_artist)
+
+    return album
