@@ -114,7 +114,7 @@ def fetch_lastfm_top_artists(limit=100):
     resp.raise_for_status()
     return resp.json()["artists"]["artist"]
 
-def fetch_lastfm_top_tracks(artist_name, limit=5):
+def fetch_lastfm_top_tracks(artist_name, limit=3):
     resp = requests.get(
         "https://ws.audioscrobbler.com/2.0/",
         params={
@@ -128,3 +128,27 @@ def fetch_lastfm_top_tracks(artist_name, limit=5):
     )
     resp.raise_for_status()
     return resp.json()["toptracks"]["track"]
+
+def spotify_search_tracks(seeds, headers):
+    found = []
+
+    for seed in seeds:
+        q = f'track:"{seed["track"]}" artist:"{seed["artist"]}"'
+        resp = requests.get(
+            "https://api.spotify.com/v1/search",
+            headers=headers,
+            params={
+                "q": q,
+                "type": "track",
+                "limit": 1,
+                "market": "US",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+
+        items = resp.json()["tracks"]["items"]
+        if items:
+            found.append(items[0])
+
+    return found
