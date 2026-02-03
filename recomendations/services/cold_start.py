@@ -113,3 +113,18 @@ def fetch_lastfm_top_artists(limit=100):
     )
     resp.raise_for_status()
     return resp.json()["artists"]["artist"]
+
+def fetch_lastfm_top_tracks(artist_name, limit=5):
+    resp = requests.get(
+        "https://ws.audioscrobbler.com/2.0/",
+        params={
+            "method": "artist.gettoptracks",
+            "artist": artist_name,
+            "api_key": os.environ.get("LASTFM_API_KEY"),
+            "format": "json",
+            "limit": limit,
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()["toptracks"]["track"]
