@@ -7,7 +7,8 @@ from users.models import Track,Album,Artist
 from django.db import transaction, IntegrityError
 from datetime import date
 from recomendations.models import Recommendation, RecommendationItem, ColdStartTrack
-
+from utils.locks import ResourceLock, ResourceLockedException
+from users.tasks.spotify_tasks import save_tracks_bulk
 
 User = get_user_model()
 logger=logging.getLogger(__name__)
@@ -18,88 +19,78 @@ def cold_start_refresh_all():
     chord([
         cold_start_fetch_spotify_global.s(),
         cold_start_fetch_spotify_viral.s(),
-        cold_start_fetch_lastfm_global.s(),
+        # cold_start_fetch_lastfm_global.s(),  # later
     ])(cold_start_finalize.s())
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
-
-@shared_task(bind=True, autoretry_for=(requests.RequestException,), retry_backoff=10, max_retries=3)
+@shared_task(
+    bind=True,
+    autoretry_for=(requests.RequestException,),
+    retry_backoff=10,
+    max_retries=3,
+)
 def cold_start_fetch_spotify_global(self):
-    logger.info("Cold start Spotify global – started")
+    lock = ResourceLock("cold_start_source", "spotify_global", timeout=600)
 
-    user = User.objects.get(email="adam@onet.pl")
-    token = ensure_spotify_token(user)
+    try:
+        with lock:
+            logger.info("Cold start Spotify GLOBAL – started")
 
-    headers = {"Authorization": f"Bearer {token.access_token}"}
+            user = User.objects.get(email="adam@onet.pl")
+            token = ensure_spotify_token(user)
+            headers = {"Authorization": f"Bearer {token.access_token}"}
 
-    playlist_id = "5ABHKGoOzxkaa28ttQV9sE"
-    url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
+            playlist_id = "5ABHKGoOzxkaa28ttQV9sE"  # Global Top 50
+            url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
 
-    resp = requests.get(
-        url,
-        headers=headers,
-        params={"limit": 50, "market": "US"},
-        timeout=10,
-    )
-    resp.raise_for_status()
+            resp = requests.get(
+                url,
+                headers=headers,
+                params={"limit": 50, "market": "US"},
+                timeout=15,
+            )
+            resp.raise_for_status()
 
-    items = resp.json().get("items", [])
-    logger.info("Fetched %s playlist items", len(items))
+            items = resp.json().get("items", [])
+            tracks_data = []
 
-    for rank, item in enumerate(items, start=1):
-        track = item.get("track")
-        if not track or track.get("is_local"):
-            continue
+            for item in items:
+                track = item.get("track")
+                if not track or track.get("is_local"):
+                    continue
+                tracks_data.append(track)
 
-        track_id = track.get("id")
-        if track_id:
-            cold_start_process_track.delay(track_id, rank)
+            if not tracks_data:
+                logger.warning("Spotify GLOBAL returned no tracks")
+                return
 
-    logger.info("Cold start Spotify global – fanout done")
+            # 🔥 JEDYNY INGEST
+            tracks_cache = save_tracks_bulk(tracks_data)
 
+            # 🧊 FACT TABLE
+            for rank, track_data in enumerate(tracks_data, start=1):
+                track = tracks_cache.get(track_data["id"])
+                if not track:
+                    continue
 
-@shared_task(bind=True, autoretry_for=(requests.RequestException,), retry_backoff=5, max_retries=3)
-def cold_start_process_track(self, track_id, rank):
-    user = User.objects.get(email="adam@onet.pl")
-    token = ensure_spotify_token(user)
-    headers = {"Authorization": f"Bearer {token.access_token}"}
+                ColdStartTrack.objects.update_or_create(
+                    track=track,
+                    source=ColdStartTrack.Source.SPOTIFY_GLOBAL,
+                    defaults={
+                        "rank": rank,
+                        "score": 1.0 - (rank - 1) / 50,
+                    },
+                )
 
-    resp = requests.get(
-        f"https://api.spotify.com/v1/tracks/{track_id}",
-        headers=headers,
-        params={"market": "US"},
-        timeout=10,
-    )
-    resp.raise_for_status()
+            logger.info(
+                "Cold start Spotify GLOBAL – finished",
+                extra={"tracks": len(tracks_data)},
+            )
 
-    track_data = resp.json()
-
-    # ingest
-    artist_ids = [a["id"] for a in track_data["artists"]]
-    artists = ingest_artists(artist_ids, headers)
-    album = ingest_album(track_data["album"], artists[0])
-    track = ingest_track(track_data, album, artists)
-
-    # FACT storage (cold start pool)
-    ColdStartTrack.objects.update_or_create(
-        track=track,
-        source=ColdStartTrack.Source.SPOTIFY_GLOBAL,
-        defaults={
-            "rank": rank,
-            "score": None,  # or simple rank-based score
-        },
-    )
-
-    logger.info(
-        "Cold start track stored",
-        extra={
-            "track_id": track.spotify_id,
-            "rank": rank,
-            "source": "spotify_global",
-        },
-    )
+    except ResourceLockedException:
+        logger.info("Spotify GLOBAL cold start already running – skipped")
 
 def cold_start_fetch_spotify_viral():
     pass
@@ -110,132 +101,3 @@ def cold_start_fetch_lastfm_global():
 def cold_start_finalize(*args, **kwargs):
     pass
 
-# ============================================================
-# INGEST TASKS FOR SPOTIFY
-# ============================================================
-def ingest_artists(artist_ids, headers):
-    artists = []
-
-    for artist_id in artist_ids:
-        try:
-            artist, created = Artist.objects.get_or_create(
-                spotify_id=artist_id,
-                defaults={"name": "Unknown"},
-            )
-        except IntegrityError:
-            # ktoś inny stworzył równolegle
-            artist = Artist.objects.get(spotify_id=artist_id)
-            created = False
-
-        # fetch danych POZA transakcją
-        if created or not artist.image_url:
-            resp = requests.get(
-                f"https://api.spotify.com/v1/artists/{artist_id}",
-                headers=headers,
-                timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            update_fields = []
-            if artist.name != data["name"]:
-                artist.name = data["name"]
-                update_fields.append("name")
-
-            if data.get("images"):
-                artist.image_url = data["images"][0]["url"]
-                update_fields.append("image_url")
-
-            if update_fields:
-                artist.save(update_fields=update_fields)
-
-        artists.append(artist)
-
-    return artists
-
-def ingest_album(album_data: dict, primary_artist: Artist) -> Album:
-    release_date = parse_spotify_release_date(album_data)
-
-    try:
-        with transaction.atomic():
-            album, _ = Album.objects.get_or_create(
-                spotify_id=album_data["id"],
-                defaults={
-                    "name": album_data["name"],
-                    "album_type": album_data.get(
-                        "album_type", Album.AlbumTypes.ALBUM
-                    ),
-                    "release_date": release_date,
-                    "image_url": (
-                        album_data["images"][0]["url"]
-                        if album_data.get("images")
-                        else None
-                    ),
-                },
-            )
-    except IntegrityError:
-        album = Album.objects.get(spotify_id=album_data["id"])
-
-    album.artists.add(primary_artist)
-    return album
-
-def ingest_track(track_data: dict, album: Album, artists: list[Artist]) -> Track:
-    """
-    Create or fetch track and attach all artists.
-    Celery-safe, idempotent.
-    """
-    try:
-        with transaction.atomic():
-            track, created = Track.objects.get_or_create(
-                spotify_id=track_data["id"],
-                defaults={
-                    "name": track_data["name"],
-                    "album": album,
-                    "duration_ms": track_data["duration_ms"],
-                    "popularity": track_data.get("popularity"),
-                    "preview_url": track_data.get("preview_url"),
-                    "preview_type": (
-                        "audio" if track_data.get("preview_url") else "embed"
-                    ),
-                    "image_url": album.image_url,
-                },
-            )
-    except IntegrityError:
-        # someone else created it concurrently
-        track = Track.objects.get(spotify_id=track_data["id"])
-        created = False
-
-    # Attach artists outside transaction
-    track.artists.add(*artists)
-
-    return track
-
-# ============================================================
-# SPOTIFY HELPERS
-# ============================================================
-def parse_spotify_release_date(album_data: dict) -> date | None:
-    release_date = album_data.get("release_date")
-    precision = album_data.get("release_date_precision")
-
-    if not release_date:
-        return None
-
-    try:
-        if precision == "day":
-            # YYYY-MM-DD
-            year, month, day = map(int, release_date.split("-"))
-            return date(year, month, day)
-
-        if precision == "month":
-            # YYYY-MM → first day of month
-            year, month = map(int, release_date.split("-"))
-            return date(year, month, 1)
-
-        if precision == "year":
-            # YYYY → Jan 1
-            return date(int(release_date), 1, 1)
-
-    except Exception:
-        return None
-
-    return None
