@@ -5,6 +5,8 @@ from rest_framework import permissions, status
 from .services.cold_start import cold_start_fetch_spotify_global
 from recomendations.models import ColdStartTrack
 from recomendations.serializers import ColdStartTrackSerializer
+from users.models import SpotifyAccount,YoutubeAccount
+from django.utils import timezone
 
 class ColdTest(APIView):
     permission_classes = [permissions.AllowAny]
@@ -18,10 +20,39 @@ class ColdTest(APIView):
 """
 By now without postgres
 """
-class ColdStartRecommender(APIView):
+class InitialSetupView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        user = request.user
+        profile = user.profile
+
+        has_spotify = SpotifyAccount.objects.filter(user=user).exists()
+        has_youtube = YoutubeAccount.objects.filter(user=user).exists()
+
+        needs_integration = not (has_spotify or has_youtube)
+        needs_onboarding = not profile.onboarding_completed
+
+        response = {
+            "has_spotify": has_spotify,
+            "has_youtube": has_youtube,
+            "needs_integration": needs_integration,
+            "needs_onboarding": needs_onboarding,
+            "needs_setup": needs_integration or needs_onboarding,
+            "tracks": None,
+        }
+
+        if needs_onboarding:
+            if not profile.onboarding_started_at:
+                profile.onboarding_started_at = timezone.now()
+                profile.save(update_fields=["onboarding_started_at"])
+
+            tracks = self._get_coldstart_tracks()
+            response["tracks"] = ColdStartTrackSerializer(tracks, many=True).data
+
+        return Response(response)
+
+    def _get_coldstart_tracks(self):
         limit = 7
 
         qs = (
@@ -29,7 +60,7 @@ class ColdStartRecommender(APIView):
             .filter(track__spotify_id__isnull=False)
             .select_related("track")
             .prefetch_related("track__artists")
-            .order_by("?")[:50]  # pobieramy więcej
+            .order_by("?")[:50]
         )
 
         seen_artists = set()
@@ -41,7 +72,6 @@ class ColdStartRecommender(APIView):
                 continue
 
             main_artist_id = artists[0].id
-
             if main_artist_id in seen_artists:
                 continue
 
@@ -51,5 +81,16 @@ class ColdStartRecommender(APIView):
             if len(selected) >= limit:
                 break
 
-        serializer = ColdStartTrackSerializer(selected, many=True)
-        return Response(serializer.data)
+        return selected
+
+class GetFeature(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self,request):
+        from users.tasks.spotify_tasks import fetch_tracks_audio_features
+        features = fetch_tracks_audio_features.delay()
+
+        return Response(
+            {"message": "Cold start"},
+            status=status.HTTP_200_OK
+        )
