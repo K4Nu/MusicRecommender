@@ -48,7 +48,7 @@ INSTALLED_APPS = [
     'django_celery_results',
 
     # Local apps
-    'users',
+    'users.apps.UsersConfig',
     'recomendations',
 ]
 
