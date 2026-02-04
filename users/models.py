@@ -104,6 +104,27 @@ class User(AbstractBaseUser, PermissionsMixin):
     def __str__(self):
         return self.email
 
+class UserProfile(models.Model):
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="profile"
+    )
+    onboarding_completed = models.BooleanField(default=False)
+    onboarding_started_at = models.DateTimeField(null=True, blank=True)
+    onboarding_completed_at = models.DateTimeField(null=True, blank=True)
+    onboarding_likes_count = models.PositiveIntegerField(default=0)
+    onboarding_swipes_count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['onboarding_completed']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email}'s profile"
+
 class SpotifyAccount(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     spotify_id = models.CharField(max_length=255, unique=True)
