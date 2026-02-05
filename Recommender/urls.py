@@ -19,7 +19,7 @@ from django.urls import path, include
 from users.views import SpotifyConnect,UserTopTracks,TestView,YoutubeConnect,TestLastFM
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 from debug_toolbar.toolbar import debug_toolbar_urls
-from recomendations.views import ColdTest,ColdStartRecommender
+from recomendations.views import ColdTest,InitialSetupView,GetFeature
 urlpatterns = [
     path('admin/', admin.site.urls),
     path("auth/spotify/connect/",SpotifyConnect.as_view()),
@@ -33,5 +33,6 @@ urlpatterns = [
     path('api/schema/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
     path("test/", TestLastFM.as_view()),
     path("t/", ColdTest.as_view()),
-    path("cold_start/", ColdStartRecommender.as_view()),
+    path("cold_start/", InitialSetupView.as_view()),
+    path("essa/",GetFeature.as_view()),
 ]+debug_toolbar_urls()
