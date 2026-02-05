@@ -7,6 +7,7 @@ from recomendations.models import ColdStartTrack
 from recomendations.serializers import ColdStartTrackSerializer
 from users.models import SpotifyAccount,YoutubeAccount
 from django.utils import timezone
+from .tasks.cold_start_tasks import create_cold_start_lastfm_tracks
 
 class ColdTest(APIView):
     permission_classes = [permissions.AllowAny]
@@ -88,7 +89,7 @@ class GetFeature(APIView):
 
     def get(self,request):
         from users.tasks.spotify_tasks import fetch_tracks_audio_features
-        features = fetch_tracks_audio_features.delay()
+        features = create_cold_start_lastfm_tracks()
 
         return Response(
             {"message": "Cold start"},
