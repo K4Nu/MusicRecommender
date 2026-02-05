@@ -11,6 +11,8 @@ from .tasks.cold_start_tasks import create_cold_start_lastfm_tracks
 from django.db import IntegrityError, transaction
 from recomendations.models import OnboardingEvent
 import logging
+from django.db.models import Count, Q
+
 
 logger = logging.getLogger(__name__)
 
@@ -36,15 +38,22 @@ class InitialSetupView(APIView):
         has_spotify = SpotifyAccount.objects.filter(user=user).exists()
         has_youtube = YoutubeAccount.objects.filter(user=user).exists()
 
-        needs_integration = not (has_spotify or has_youtube)
-        needs_onboarding = not profile.onboarding_completed
+        stats = OnboardingEvent.objects.filter(user=user).aggregate(
+            total=Count("id"),
+            likes=Count("id", filter=Q(action=OnboardingEvent.Action.LIKE)),
+        )
+
+        likes = stats["likes"] or 0
+
+        onboarding_completed = likes >= 3
+        needs_onboarding = not onboarding_completed
 
         response = {
             "has_spotify": has_spotify,
             "has_youtube": has_youtube,
-            "needs_integration": needs_integration,
+            "needs_integration": not (has_spotify or has_youtube),
             "needs_onboarding": needs_onboarding,
-            "needs_setup": needs_integration or needs_onboarding,
+            "needs_setup": needs_onboarding or not (has_spotify or has_youtube),
             "tracks": [],  # ✅ ZAWSZE lista
         }
 
