@@ -8,6 +8,9 @@ from recomendations.serializers import ColdStartTrackSerializer
 from users.models import SpotifyAccount,YoutubeAccount
 from django.utils import timezone
 from .tasks.cold_start_tasks import create_cold_start_lastfm_tracks
+from django.db import IntegrityError, transaction
+from recomendations.models import OnboardingEvent
+from recommndations.serializers import OnboardingEventSerializer
 
 class ColdTest(APIView):
     permission_classes = [permissions.AllowAny]
@@ -95,3 +98,4 @@ class GetFeature(APIView):
             {"message": "Cold start"},
             status=status.HTTP_200_OK
         )
+
