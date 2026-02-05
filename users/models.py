@@ -113,6 +113,15 @@ class UserProfile(models.Model):
     onboarding_completed = models.BooleanField(default=False)
     onboarding_started_at = models.DateTimeField(null=True, blank=True)
     onboarding_completed_at = models.DateTimeField(null=True, blank=True)
+    onboarding_quality = models.CharField(
+        max_length=20,
+        choices=[
+            ("GOOD", "Enough signal"),
+            ("LOW", "Weak signal"),
+        ],
+        null=True,
+        blank=True,
+    )
     onboarding_likes_count = models.PositiveIntegerField(default=0)
     onboarding_swipes_count = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)

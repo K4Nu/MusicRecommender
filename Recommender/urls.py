@@ -19,7 +19,7 @@ from django.urls import path, include
 from users.views import SpotifyConnect,UserTopTracks,TestView,YoutubeConnect,TestLastFM
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 from debug_toolbar.toolbar import debug_toolbar_urls
-from recomendations.views import ColdTest,InitialSetupView,GetFeature
+from recomendations.views import ColdTest,InitialSetupView,GetFeature, OnboardingInteractView
 urlpatterns = [
     path('admin/', admin.site.urls),
     path("auth/spotify/connect/",SpotifyConnect.as_view()),
@@ -35,4 +35,5 @@ urlpatterns = [
     path("t/", ColdTest.as_view()),
     path("cold_start/", InitialSetupView.as_view()),
     path("essa/",GetFeature.as_view()),
+    path("api/onboarding/", OnboardingInteractView.as_view()),
 ]+debug_toolbar_urls()

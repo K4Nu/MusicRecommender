@@ -1,6 +1,7 @@
 from django.db import models
 from django.contrib.auth import get_user_model
 from .cold_start_source import ColdStartTrack
+from django.db.models import Count, Q
 
 User = get_user_model()
 
@@ -54,6 +55,20 @@ class OnboardingEvent(models.Model):
             models.Index(fields=["user", "action"]),
         ]
         ordering = ["created_at"]
+
+    @classmethod
+    def get_user_stats(cls, user):
+        """
+        Single source of truth for onboarding progress.
+        """
+        return cls.objects.filter(user=user).aggregate(
+            likes_count=Count("id", filter=Q(action=cls.Action.LIKE)),
+            skips_count=Count("id", filter=Q(action=cls.Action.SKIP)),
+            not_my_style_count=Count(
+                "id", filter=Q(action=cls.Action.NOT_MY_STYLE)
+            ),
+            total_count=Count("id"),
+        )
 
     def save(self, *args, **kwargs):
         """
