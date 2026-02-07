@@ -12,6 +12,8 @@ from django.db import IntegrityError, transaction
 from recomendations.models import OnboardingEvent
 import logging
 from django.db.models import Count, Q
+from django.views.decorators.cache import cache_page
+from django.utils.decorators import method_decorator
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +297,7 @@ class OnboardingInteractView(APIView):
             },
             status=status.HTTP_200_OK,
         )
-
+@method_decorator(cache_page(10), name="get")
 class UserStatus(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
