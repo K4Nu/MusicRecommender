@@ -2,13 +2,11 @@
 source = users,utils
 omit =
     */migrations/*
+    */admin.py
     */tests/*
     */tasks/*
-    */admin.py
-    */__init__.py
-    */apps.py
-    manage.py
-    */settings/*
+    */youtube_classifiers.py
+    */services.py
 
 [report]
 exclude_lines =
