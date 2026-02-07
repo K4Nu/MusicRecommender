@@ -4,8 +4,8 @@ from rest_framework.views import APIView
 from rest_framework import permissions, status
 from .services.cold_start import cold_start_fetch_spotify_global
 from recomendations.models import ColdStartTrack
-from recomendations.serializers import ColdStartTrackSerializer,OnboardingEventSerializer
-from users.models import SpotifyAccount,YoutubeAccount
+from recomendations.serializers import ColdStartTrackSerializer, OnboardingEventSerializer
+from users.models import SpotifyAccount, YoutubeAccount
 from django.utils import timezone
 from .tasks.cold_start_tasks import create_cold_start_lastfm_tracks
 from django.db import IntegrityError, transaction
@@ -13,48 +13,75 @@ from recomendations.models import OnboardingEvent
 import logging
 from django.db.models import Count, Q
 
-
 logger = logging.getLogger(__name__)
+
 
 class ColdTest(APIView):
     permission_classes = [permissions.AllowAny]
 
-    def get(self,request):
+    def get(self, request):
         cold_start_fetch_spotify_global.delay()
         return Response(
             {"message": "Cold start"},
             status=status.HTTP_200_OK
         )
+
+
 """
 By now without postgres
 """
+
+
 class InitialSetupView(APIView):
     permission_classes = [permissions.IsAuthenticated]
+
+    REQUIRED_LIKES = 3
+    TRACKS_PER_BATCH = 20  # Add this constant
 
     def get(self, request):
         user = request.user
         profile = user.profile
 
+        # Early exit if already completed
+        if profile.onboarding_completed:
+            has_spotify = SpotifyAccount.objects.filter(user=user).exists()
+            has_youtube = YoutubeAccount.objects.filter(user=user).exists()
+
+            return Response({
+                "needs_onboarding": False,
+                "needs_integration": not (has_spotify or has_youtube),
+                "tracks": [],
+                "stats": {
+                    "likes_count": OnboardingEvent.objects.filter(
+                        user=user,
+                        action=OnboardingEvent.Action.LIKE
+                    ).count(),
+                    "required_likes": self.REQUIRED_LIKES,
+                },
+            })
+
         has_spotify = SpotifyAccount.objects.filter(user=user).exists()
         has_youtube = YoutubeAccount.objects.filter(user=user).exists()
 
         stats = OnboardingEvent.objects.filter(user=user).aggregate(
-            total=Count("id"),
-            likes=Count("id", filter=Q(action=OnboardingEvent.Action.LIKE)),
+            likes_count=Count(
+                "id",
+                filter=Q(action=OnboardingEvent.Action.LIKE),
+            )
         )
 
-        likes = stats["likes"] or 0
-
-        onboarding_completed = likes >= 3
-        needs_onboarding = not onboarding_completed
+        likes = stats["likes_count"] or 0
+        needs_onboarding = likes < self.REQUIRED_LIKES
+        needs_integration = not (has_spotify or has_youtube)
 
         response = {
-            "has_spotify": has_spotify,
-            "has_youtube": has_youtube,
-            "needs_integration": not (has_spotify or has_youtube),
             "needs_onboarding": needs_onboarding,
-            "needs_setup": needs_onboarding or not (has_spotify or has_youtube),
-            "tracks": [],  # ✅ ZAWSZE lista
+            "needs_integration": needs_integration,
+            "tracks": [],
+            "stats": {
+                "likes_count": likes,
+                "required_likes": self.REQUIRED_LIKES,
+            },
         }
 
         if needs_onboarding:
@@ -62,19 +89,16 @@ class InitialSetupView(APIView):
                 profile.onboarding_started_at = timezone.now()
                 profile.save(update_fields=["onboarding_started_at"])
 
-            tracks = self._get_coldstart_tracks()
-            response["tracks"] = ColdStartTrackSerializer(
-                tracks,
-                many=True
-            ).data
-        logger.info(
-            f"Data is {response}"
-        )
+            tracks = self._get_coldstart_tracks(limit=self.TRACKS_PER_BATCH)  # Pass the limit here
+            response["tracks"] = ColdStartTrackSerializer(tracks, many=True).data
+
+        logger.info(f"InitialSetupView response: {response}")
         return Response(response)
 
-    def _get_coldstart_tracks(self):
-        LIMIT = 7
-
+    def _get_coldstart_tracks(self, limit: int):
+        """
+        Returns a batch of cold start tracks with artist diversity.
+        """
         qs = (
             ColdStartTrack.objects
             .filter(track__spotify_id__isnull=False)
@@ -86,7 +110,6 @@ class InitialSetupView(APIView):
         selected = []
         seen_artists = set()
 
-        # 🎯 główny selection logic
         for cst in qs:
             artists = list(cst.track.artists.all())
             if not artists:
@@ -99,18 +122,20 @@ class InitialSetupView(APIView):
             seen_artists.add(main_artist_id)
             selected.append(cst)
 
-            if len(selected) >= LIMIT:
+            if len(selected) >= limit:
                 break
 
-        if len(selected) < LIMIT:
-            selected = list(qs[:LIMIT])
+        # 🛟 fallback
+        if len(selected) < limit:
+            selected = list(qs[:limit])
 
         return selected
+
 
 class GetFeature(APIView):
     permission_classes = [permissions.AllowAny]
 
-    def get(self,request):
+    def get(self, request):
         from users.tasks.spotify_tasks import fetch_tracks_audio_features
         features = create_cold_start_lastfm_tracks()
 
@@ -119,29 +144,29 @@ class GetFeature(APIView):
             status=status.HTTP_200_OK
         )
 
+
 class OnboardingInteractView(APIView):
     """
     Handle batch onboarding event submissions.
-    Idempotent, refresh-safe, frontend-friendly.
+    Endless until user reaches MIN_LIKES_TO_COMPLETE.
     """
     permission_classes = [permissions.IsAuthenticated]
 
     MAX_EVENTS_PER_BATCH = 20
     MIN_LIKES_TO_COMPLETE = 3
-    MIN_EVENTS_TO_COMPLETE = 7
 
     def post(self, request):
         user = request.user
         profile = user.profile
 
-        # Idempotent early exit
+        # 🛑 hard idempotency
         if profile.onboarding_completed:
             return Response(
                 {
                     "status": "already_completed",
                     "quality": profile.onboarding_quality,
                 },
-                status=status.HTTP_200_OK
+                status=status.HTTP_200_OK,
             )
 
         events_data = request.data.get("events", [])
@@ -149,22 +174,22 @@ class OnboardingInteractView(APIView):
         if not events_data:
             return Response(
                 {"error": "No events provided"},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         if len(events_data) > self.MAX_EVENTS_PER_BATCH:
             return Response(
                 {"error": "Too many events in one request"},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         serializer = OnboardingEventSerializer(
             data=events_data,
-            many=True
+            many=True,
         )
         serializer.is_valid(raise_exception=True)
 
-        # Mark onboarding as started
+        # mark onboarding start once
         if not profile.onboarding_started_at:
             profile.onboarding_started_at = timezone.now()
             profile.save(update_fields=["onboarding_started_at"])
@@ -189,7 +214,7 @@ class OnboardingInteractView(APIView):
                 if not cold_start_track:
                     logger.warning(
                         "ColdStartTrack %s not found",
-                        event_data["cold_start_track_id"]
+                        event_data["cold_start_track_id"],
                     )
                     continue
 
@@ -199,67 +224,86 @@ class OnboardingInteractView(APIView):
                     defaults={
                         "action": event_data["action"],
                         "position": event_data.get("position"),
-                    }
+                    },
                 )
 
                 if created:
                     events_written += 1
+                    continue
+
+                # update only if changed
+                updated_fields = []
+
+                if event.action != event_data["action"]:
+                    event.action = event_data["action"]
+                    updated_fields.append("action")
+
+                if (
+                        event_data.get("position") is not None
+                        and event.position != event_data["position"]
+                ):
+                    event.position = event_data["position"]
+                    updated_fields.append("position")
+
+                if updated_fields:
+                    event.save(update_fields=updated_fields)
+                    events_written += 1
                 else:
-                    updated = False
+                    events_ignored += 1
 
-                    if event.action != event_data["action"]:
-                        event.action = event_data["action"]
-                        updated = True
+        stats = OnboardingEvent.objects.filter(user=user).aggregate(
+            total_count=Count("id"),
+            likes_count=Count(
+                "id",
+                filter=Q(action=OnboardingEvent.Action.LIKE),
+            ),
+        )
 
-                    if event_data.get("position") is not None and event.position != event_data["position"]:
-                        event.position = event_data["position"]
-                        updated = True
+        likes = stats["likes_count"] or 0
 
-                    if updated:
-                        event.save(update_fields=["action", "position"])
-                        events_written += 1
-                    else:
-                        events_ignored += 1
+        if likes >= self.MIN_LIKES_TO_COMPLETE:
+            profile.onboarding_completed = True
+            profile.onboarding_completed_at = timezone.now()
+            profile.onboarding_quality = "GOOD"
 
-            # Source of truth
-            stats = OnboardingEvent.get_user_stats(user)
+            profile.save(update_fields=[
+                "onboarding_completed",
+                "onboarding_completed_at",
+                "onboarding_quality",
+            ])
 
-            # 🔑 FINAL COMPLETION LOGIC
-            if stats["total_count"] >= self.MIN_EVENTS_TO_COMPLETE:
-                profile.onboarding_completed = True
-                profile.onboarding_completed_at = timezone.now()
+            return Response(
+                {
+                    "status": "onboarding_completed",
+                    "quality": profile.onboarding_quality,
+                    "events_written": events_written,
+                    "events_ignored": events_ignored,
+                    "stats": stats,
+                },
+                status=status.HTTP_200_OK,
+            )
 
-                profile.onboarding_quality = (
-                    "GOOD"
-                    if stats["likes_count"] >= self.MIN_LIKES_TO_COMPLETE
-                    else "LOW"
-                )
-
-                profile.save(update_fields=[
-                    "onboarding_completed",
-                    "onboarding_completed_at",
-                    "onboarding_quality",
-                ])
-
-                return Response(
-                    {
-                        "status": "onboarding_completed",
-                        "quality": profile.onboarding_quality,
-                        "events_written": events_written,
-                        "events_ignored": events_ignored,
-                        "stats": stats,
-                    },
-                    status=status.HTTP_200_OK
-                )
-
-        # Still collecting
+        # 🔁 ENDLESS MODE
         return Response(
             {
-                "status": "events_saved",
+                "status": "needs_more_likes",
                 "events_written": events_written,
                 "events_ignored": events_ignored,
                 "stats": stats,
+                "likes_missing": self.MIN_LIKES_TO_COMPLETE - likes,
                 "onboarding_completed": False,
             },
-            status=status.HTTP_201_CREATED
+            status=status.HTTP_200_OK,
         )
+
+class UserStatus(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user=request.user
+
+        return Response({
+            "onboarding_completed": user.profile.onboarding_completed,
+            "has_spotify": SpotifyAccount.objects.filter(user=user).exists(),
+            "has_youtube": YoutubeAccount.objects.filter(user=user).exists(),
+        })
