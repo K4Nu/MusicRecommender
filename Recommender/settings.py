@@ -3,7 +3,8 @@ from pathlib import Path
 from datetime import timedelta
 import os
 from dotenv import load_dotenv
-
+import sentry_sdk
+from sentry_sdk.integrations.django import DjangoIntegration
 # ---------------------- PATHS & ENV ----------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv()
@@ -228,3 +229,14 @@ LOGGING = {
         "level": "INFO",
     },
 }
+
+SENTRY_DSN = os.getenv("SENTRY_DSN")
+
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[DjangoIntegration()],
+        traces_sample_rate=0.2,      # v1: 20% requests
+        send_default_pii=False,      # GDPR-safe
+        environment=os.getenv("ENV", "local"),
+    )
