@@ -15,7 +15,7 @@ LAST_FM_API_KEY=os.getenv("LAST_FM_API_KEY")
 # ---------------------- SECURITY / DEBUG ----------------------
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-change-me")
 DEBUG = os.getenv("DEBUG", "True") == "True"
-ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+ALLOWED_HOSTS = ["127.0.0.1", "localhost",'host.docker.internal']
 INTERNAL_IPS = ["127.0.0.1", "localhost"]
 # ---------------------- CORS / CSRF ----------------------
 # Frontend: 127.0.0.1:5173 – keep host consistent
@@ -25,6 +25,7 @@ CORS_ALLOWED_ORIGINS = ["http://127.0.0.1:5173"]
 # ---------------------- DJANGO CORE ----------------------
 INSTALLED_APPS = [
     # Django
+    "django_prometheus",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -56,6 +57,7 @@ INSTALLED_APPS = [
 SITE_ID = 1
 
 MIDDLEWARE = [
+    "django_prometheus.middleware.PrometheusBeforeMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -67,6 +69,7 @@ MIDDLEWARE = [
     "debug_toolbar.middleware.DebugToolbarMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",
+    "django_prometheus.middleware.PrometheusAfterMiddleware",
 ]
 
 ROOT_URLCONF = 'Recommender.urls'
