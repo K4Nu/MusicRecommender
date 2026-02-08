@@ -5,6 +5,7 @@ import os
 from dotenv import load_dotenv
 import sentry_sdk
 from sentry_sdk.integrations.django import DjangoIntegration
+from decouple import config
 # ---------------------- PATHS & ENV ----------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv()
@@ -15,7 +16,7 @@ LAST_FM_API_KEY=os.getenv("LAST_FM_API_KEY")
 # ---------------------- SECURITY / DEBUG ----------------------
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-change-me")
 DEBUG = os.getenv("DEBUG", "True") == "True"
-ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+ALLOWED_HOSTS = ["127.0.0.1", "localhost",'host.docker.internal']
 INTERNAL_IPS = ["127.0.0.1", "localhost"]
 # ---------------------- CORS / CSRF ----------------------
 # Frontend: 127.0.0.1:5173 – keep host consistent
@@ -25,6 +26,7 @@ CORS_ALLOWED_ORIGINS = ["http://127.0.0.1:5173"]
 # ---------------------- DJANGO CORE ----------------------
 INSTALLED_APPS = [
     # Django
+    "django_prometheus",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -56,6 +58,7 @@ INSTALLED_APPS = [
 SITE_ID = 1
 
 MIDDLEWARE = [
+    "django_prometheus.middleware.PrometheusBeforeMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -67,6 +70,7 @@ MIDDLEWARE = [
     "debug_toolbar.middleware.DebugToolbarMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",
+    "django_prometheus.middleware.PrometheusAfterMiddleware",
 ]
 
 ROOT_URLCONF = 'Recommender.urls'
@@ -92,9 +96,16 @@ WSGI_APPLICATION = 'Recommender.wsgi.application'
 
 # ---------------------- DATABASE ----------------------
 DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': config('DB_NAME'),
+        'USER': config('DB_USER'),
+        'PASSWORD': config('DB_PASSWORD'),
+        'HOST': config('DB_HOST'),
+        'PORT': '5432',
+        'OPTIONS': {
+            'sslmode': 'require',
+        },
     }
 }
 

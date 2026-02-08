@@ -21,6 +21,7 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, Spec
 from debug_toolbar.toolbar import debug_toolbar_urls
 from recomendations.views import ColdTest,InitialSetupView,GetFeature, OnboardingInteractView,UserStatus
 urlpatterns = [
+    path("", include("django_prometheus.urls")),
     path('admin/', admin.site.urls),
     path("auth/spotify/connect/",SpotifyConnect.as_view()),
     path("auth/youtube/connect/",YoutubeConnect.as_view()),
@@ -37,4 +38,5 @@ urlpatterns = [
     path("essa/",GetFeature.as_view()),
     path("api/onboarding/", OnboardingInteractView.as_view()),
     path("api/me/", UserStatus.as_view()),
+
 ]+debug_toolbar_urls()
