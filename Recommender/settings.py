@@ -32,6 +32,11 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "django.contrib.sites",
 
+    # Local apps
+    'users.apps.UsersConfig',
+    'recomendations',
+    'music',
+
     # Third-party
     "corsheaders",
     "rest_framework",
@@ -47,10 +52,7 @@ INSTALLED_APPS = [
     'django_celery_beat',
     'django_celery_results',
 
-    # Local apps
-    'users.apps.UsersConfig',
-    'recomendations',
-    'music'
+
 ]
 
 SITE_ID = 1

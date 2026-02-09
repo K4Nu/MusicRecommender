@@ -3,7 +3,7 @@ import logging
 import requests
 from django.contrib.auth import get_user_model
 from users.services import ensure_spotify_token
-from users.models import Track,Album,Artist
+from music.models import Track,Album,Artist
 from django.db import transaction, IntegrityError
 from datetime import date
 from recomendations.models import Recommendation, RecommendationItem, ColdStartTrack

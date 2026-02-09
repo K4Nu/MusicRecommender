@@ -10,7 +10,7 @@ from rest_framework.views import APIView
 from rest_framework import permissions, status
 from .tasks.spotify_tasks import fetch_spotify_initial_data,fetch_recently_played
 from .tasks.youtube_tasks import sync_youtube_user
-from users.models import SpotifyAccount,UserTopItem,YoutubeAccount,UserYoutubeChannel
+from users.models import SpotifyAccount,UserTopItem,YoutubeAccount
 from rest_framework import generics
 from .serializers import UserTopTrackSerializer
 from drf_spectacular.utils import extend_schema

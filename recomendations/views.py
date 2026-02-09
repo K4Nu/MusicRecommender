@@ -2,7 +2,6 @@ from django.shortcuts import render
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions, status
-from .services.cold_start import cold_start_fetch_spotify_global
 from recomendations.models import ColdStartTrack
 from recomendations.serializers import ColdStartTrackSerializer, OnboardingEventSerializer
 from users.models import SpotifyAccount, YoutubeAccount
@@ -141,7 +140,6 @@ class GetFeature(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
-        from users.tasks.spotify_tasks import fetch_tracks_audio_features
         features = create_cold_start_lastfm_tracks()
 
         return Response(
@@ -164,7 +162,6 @@ class OnboardingInteractView(APIView):
         user = request.user
         profile = user.profile
 
-        # 🛑 hard idempotency
         if profile.onboarding_completed:
             return Response(
                 {
