@@ -4,6 +4,8 @@ from datetime import timedelta
 import os
 from dotenv import load_dotenv
 from decouple import config
+from sentry_sdk.integrations.django import DjangoIntegration
+import sentry_sdk
 # ---------------------- PATHS & ENV ----------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv()
