@@ -137,11 +137,11 @@ class UserProfile(models.Model):
 class SpotifyAccount(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     spotify_id = models.CharField(max_length=255, unique=True)
-    access_token = models.CharField(max_length=255)
-    refresh_token = models.CharField(max_length=255)
+    access_token = models.TextField()
+    refresh_token = models.TextField()
     expires_at = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
-    playlists_etag = models.CharField(max_length=128, null=True, blank=True)
+    playlists_etag = models.TextField(null=True, blank=True)
     last_synced_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
@@ -457,7 +457,7 @@ class SpotifyPlaylist(models.Model):
         verbose_name_plural = 'Spotify Playlists'
 
     def __str__(self):
-        return f"{self.name} ({self.user.username})"
+        return f"{self.name} ({self.user.email})"
 
 class SpotifyPlaylistTrack(models.Model):
     playlist = models.ForeignKey(
@@ -932,8 +932,8 @@ class TrackSimilarity(BaseSimilarity):
 class YoutubeAccount(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
 
-    access_token = models.CharField(max_length=512)
-    refresh_token = models.CharField(max_length=512)
+    access_token = models.TextField()
+    refresh_token = models.TextField()
     expires_at = models.DateTimeField()
 
     # 🔹 sync helpers

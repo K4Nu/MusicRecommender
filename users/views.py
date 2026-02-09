@@ -261,8 +261,6 @@ class YoutubeConnect(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-
-
         # Zapisz konto
         expires_at = timezone.now() + timedelta(seconds=expires_in)
 

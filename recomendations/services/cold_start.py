@@ -13,13 +13,16 @@ import os
 
 User = get_user_model()
 logger=logging.getLogger(__name__)
+LASTFM_TOP_ARTISTS = 40
+LASTFM_TRACKS_PER_ARTIST = 2
+SPOTIFY_MATCH_LIMIT = 60
 
 @shared_task
 def cold_start_refresh_all():
     """Orchestrator: fetch all playlists in parallel, then finalize."""
     chord([
         cold_start_fetch_spotify_global.s(),
-        # cold_start_fetch_lastfm_global.s(),  # later
+         cold_start_fetch_lastfm_global.s(),
     ])(cold_start_finalize.s())
 
 logger = logging.getLogger(__name__)
@@ -91,11 +94,91 @@ def cold_start_fetch_spotify_global(self):
         logger.info("Spotify GLOBAL cold start already running – skipped")
 
 
-def cold_start_fetch_lastfm_global():
-    pass
+@shared_task(
+    bind=True,
+    autoretry_for=(requests.RequestException,),
+    retry_backoff=15,
+    max_retries=3,
+)
+def cold_start_fetch_lastfm_global(self):
+    lock = ResourceLock("cold_start_source", "lastfm_global", timeout=900)
 
+    try:
+        with lock:
+            logger.info("Cold start LastFM GLOBAL v2 – started")
+
+            user = User.objects.get(email="adam@onet.pl")
+            token = ensure_spotify_token(user)
+            headers = {"Authorization": f"Bearer {token.access_token}"}
+
+            artists = fetch_lastfm_top_artists(limit=LASTFM_TOP_ARTISTS)
+
+            # 1️⃣ Build seed pool (deduped)
+            seeds = []
+            seen = set()
+
+            for artist in artists:
+                tracks = fetch_lastfm_top_tracks(
+                    artist["name"],
+                    limit=LASTFM_TRACKS_PER_ARTIST
+                )
+
+                for t in tracks:
+                    key = (
+                        artist["name"].lower().strip(),
+                        t["name"].lower().strip(),
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    seeds.append({
+                        "artist": artist["name"],
+                        "track": t["name"],
+                    })
+
+            # 2️⃣ Spotify canonicalization
+            spotify_tracks = spotify_search_tracks(seeds, headers)
+            spotify_tracks = spotify_tracks[:SPOTIFY_MATCH_LIMIT]
+
+            if not spotify_tracks:
+                logger.warning("LastFM GLOBAL v2 – no Spotify matches")
+                return
+
+            tracks_cache = save_tracks_bulk(spotify_tracks)
+
+            total = len(spotify_tracks)
+
+            # 3️⃣ Save cold start tracks
+            for idx, track_data in enumerate(spotify_tracks):
+                track = tracks_cache.get(track_data["id"])
+                if not track:
+                    continue
+
+                # nonlinear decay (top-heavy)
+                score = 1.0 - (idx / total) ** 0.5
+
+                ColdStartTrack.objects.update_or_create(
+                    track=track,
+                    source=ColdStartTrack.Source.LASTFM_GLOBAL,
+                    defaults={
+                        "rank": idx + 1,
+                        "score": round(score, 4),
+                    },
+                )
+
+            logger.info(
+                "Cold start LastFM GLOBAL v2 – finished",
+                extra={"tracks": total},
+            )
+
+    except ResourceLockedException:
+        logger.info("LastFM GLOBAL v2 already running – skipped")
+
+@shared_task
 def cold_start_finalize(*args, **kwargs):
-    pass
+    logger.info("Cold Start data finished")
+    return
 
 """
 LastFM helpers
