@@ -36,36 +36,36 @@ By now without postgres
 """
 
 
+from django.db.models import Count, Q
+from django.utils import timezone
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import permissions
+import logging
+
+from users.models import SpotifyAccount, YoutubeAccount
+from recomendations.models import ColdStartTrack, OnboardingEvent
+from recomendations.serializers import ColdStartTrackSerializer
+
+logger = logging.getLogger(__name__)
+
+
 class InitialSetupView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     REQUIRED_LIKES = 3
-    TRACKS_PER_BATCH = 20  # Add this constant
+    TRACKS_PER_BATCH = 20
 
     def get(self, request):
         user = request.user
         profile = user.profile
 
-        # Early exit if already completed
-        if profile.onboarding_completed:
-            has_spotify = SpotifyAccount.objects.filter(user=user).exists()
-            has_youtube = YoutubeAccount.objects.filter(user=user).exists()
-
-            return Response({
-                "needs_onboarding": False,
-                "needs_integration": not (has_spotify or has_youtube),
-                "tracks": [],
-                "stats": {
-                    "likes_count": OnboardingEvent.objects.filter(
-                        user=user,
-                        action=OnboardingEvent.Action.LIKE
-                    ).count(),
-                    "required_likes": self.REQUIRED_LIKES,
-                },
-            })
-
         has_spotify = SpotifyAccount.objects.filter(user=user).exists()
         has_youtube = YoutubeAccount.objects.filter(user=user).exists()
+        has_any_integration = has_spotify or has_youtube
+
+        needs_onboarding = not profile.onboarding_completed
+        needs_integration = not has_any_integration
 
         stats = OnboardingEvent.objects.filter(user=user).aggregate(
             likes_count=Count(
@@ -75,8 +75,6 @@ class InitialSetupView(APIView):
         )
 
         likes = stats["likes_count"] or 0
-        needs_onboarding = likes < self.REQUIRED_LIKES
-        needs_integration = not (has_spotify or has_youtube)
 
         response = {
             "needs_onboarding": needs_onboarding,
@@ -88,12 +86,17 @@ class InitialSetupView(APIView):
             },
         }
 
-        if needs_onboarding:
+        if not needs_onboarding:
+            logger.info(f"InitialSetupView response: {response}")
+            return Response(response)
+
+        # 🎧 REAL ONBOARDING (tylko jeśli NIE ma integracji)
+        if needs_integration:
             if not profile.onboarding_started_at:
                 profile.onboarding_started_at = timezone.now()
                 profile.save(update_fields=["onboarding_started_at"])
 
-            tracks = self._get_coldstart_tracks(limit=self.TRACKS_PER_BATCH)  # Pass the limit here
+            tracks = self._get_coldstart_tracks(limit=self.TRACKS_PER_BATCH)
             response["tracks"] = ColdStartTrackSerializer(tracks, many=True).data
 
         logger.info(f"InitialSetupView response: {response}")
@@ -129,7 +132,7 @@ class InitialSetupView(APIView):
             if len(selected) >= limit:
                 break
 
-        # 🛟 fallback
+        # fallback
         if len(selected) < limit:
             selected = list(qs[:limit])
 
