@@ -8,19 +8,8 @@ import logging
 import requests
 import heapq
 from utils.locks import ResourceLock, ResourceLockedException
-from users.models import (
-    Artist,
-    ArtistLastFMData,
-    ArtistTag,
-    Tag,
-    UserTopItem,
-    ArtistSimilarity,
-    TrackTag,
-    TrackSimilarity,
-    Track,
-    TrackLastFMData,
-    Album
-)
+from users.models import UserTopItem
+from music.models import (Artist,ArtistLastFMData,ArtistTag, Tag, ArtistSimilarity, TrackTag, TrackSimilarity, Track, TrackLastFMData, Album)
 from django.db import transaction
 
 logger = logging.getLogger(__name__)

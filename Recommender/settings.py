@@ -3,8 +3,6 @@ from pathlib import Path
 from datetime import timedelta
 import os
 from dotenv import load_dotenv
-import sentry_sdk
-from sentry_sdk.integrations.django import DjangoIntegration
 from decouple import config
 # ---------------------- PATHS & ENV ----------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -35,6 +33,11 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "django.contrib.sites",
 
+    # Local apps
+    'users.apps.UsersConfig',
+    'recomendations',
+    'music',
+
     # Third-party
     "corsheaders",
     "rest_framework",
@@ -50,9 +53,7 @@ INSTALLED_APPS = [
     'django_celery_beat',
     'django_celery_results',
 
-    # Local apps
-    'users.apps.UsersConfig',
-    'recomendations',
+
 ]
 
 SITE_ID = 1
@@ -108,7 +109,6 @@ DATABASES = {
         },
     }
 }
-
 
 # ---------------------- PASSWORD VALIDATORS ----------------------
 AUTH_PASSWORD_VALIDATORS = [
