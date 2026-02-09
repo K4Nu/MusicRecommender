@@ -14,7 +14,7 @@ import logging
 from django.db.models import Count, Q
 from django.views.decorators.cache import cache_page
 from django.utils.decorators import method_decorator
-
+from celery import chain
 logger = logging.getLogger(__name__)
 
 
@@ -22,7 +22,9 @@ class ColdTest(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
-        cold_start_fetch_spotify_global.delay()
+        cold_start_fetch_spotify_global()
+        create_cold_start_lastfm_tracks()
+
         return Response(
             {"message": "Cold start"},
             status=status.HTTP_200_OK
