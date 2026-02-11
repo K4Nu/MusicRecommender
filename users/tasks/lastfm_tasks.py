@@ -22,7 +22,7 @@ LASTFM_DAYS_TTL = 30
 # ============================================================
 
 def get_lastfm_api_key() -> str | None:
-    return getattr(settings, "LAST_FM_API_KEY", None)
+    return getattr(settings, "LASTFM_API_KEY", None)
 
 
 def lastfm_get(params: dict) -> dict | None:
@@ -38,7 +38,7 @@ def lastfm_get(params: dict) -> dict | None:
     """
     api_key = get_lastfm_api_key()
     if not api_key:
-        logger.error("LAST_FM_API_KEY not set")
+        logger.error("LASTFM_API_KEY not set")
         return None
 
     try:
@@ -722,8 +722,9 @@ def _fetch_track_info(track_id: int):
         logger.info("Track not found", extra={"track_id": track_id})
         return
 
-    if hasattr(track, 'lastfm_cache'):
-        lastfm = track.lastfm_cache
+    lastfm = getattr(track, "lastfm_cache", None)
+
+    if lastfm:
         if timezone.now() - lastfm.fetched_at < timedelta(days=LASTFM_DAYS_TTL):
             return
 

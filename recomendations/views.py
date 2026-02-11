@@ -2,28 +2,28 @@ from django.shortcuts import render
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions, status
-from recomendations.models import ColdStartTrack
-from recomendations.serializers import ColdStartTrackSerializer, OnboardingEventSerializer
-from users.models import SpotifyAccount, YoutubeAccount
-from django.utils import timezone
+from recomendations.models import ColdStartTrack,UserTag
+from music.models import TrackTag
 from .tasks.cold_start_tasks import create_cold_start_lastfm_tracks
 from .services.cold_start import cold_start_refresh_all
 from django.db import IntegrityError, transaction
-from recomendations.models import OnboardingEvent
-import logging
-from django.db.models import Count, Q
 from django.views.decorators.cache import cache_page
 from django.utils.decorators import method_decorator
-from celery import chain
-logger = logging.getLogger(__name__)
-
+from django.db.models import Count, Q
+from django.utils import timezone
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import permissions
+import logging
+from users.models import SpotifyAccount, YoutubeAccount
+from recomendations.models import ColdStartTrack, OnboardingEvent
+from recomendations.serializers import ColdStartTrackSerializer,OnboardingEventSerializer
 
 class ColdTest(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
         cold_start_refresh_all.delay()
-        create_cold_start_lastfm_tracks()
 
         return Response(
             {"message": "Cold start"},
@@ -35,37 +35,25 @@ class ColdTest(APIView):
 By now without postgres
 """
 
+logger = logging.getLogger(__name__)
+
 
 class InitialSetupView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     REQUIRED_LIKES = 3
-    TRACKS_PER_BATCH = 20  # Add this constant
+    TRACKS_PER_BATCH = 20
 
     def get(self, request):
         user = request.user
         profile = user.profile
 
-        # Early exit if already completed
-        if profile.onboarding_completed:
-            has_spotify = SpotifyAccount.objects.filter(user=user).exists()
-            has_youtube = YoutubeAccount.objects.filter(user=user).exists()
-
-            return Response({
-                "needs_onboarding": False,
-                "needs_integration": not (has_spotify or has_youtube),
-                "tracks": [],
-                "stats": {
-                    "likes_count": OnboardingEvent.objects.filter(
-                        user=user,
-                        action=OnboardingEvent.Action.LIKE
-                    ).count(),
-                    "required_likes": self.REQUIRED_LIKES,
-                },
-            })
-
         has_spotify = SpotifyAccount.objects.filter(user=user).exists()
         has_youtube = YoutubeAccount.objects.filter(user=user).exists()
+        has_any_integration = has_spotify or has_youtube
+
+        needs_onboarding = not profile.onboarding_completed
+        needs_integration = not has_any_integration
 
         stats = OnboardingEvent.objects.filter(user=user).aggregate(
             likes_count=Count(
@@ -75,8 +63,6 @@ class InitialSetupView(APIView):
         )
 
         likes = stats["likes_count"] or 0
-        needs_onboarding = likes < self.REQUIRED_LIKES
-        needs_integration = not (has_spotify or has_youtube)
 
         response = {
             "needs_onboarding": needs_onboarding,
@@ -88,12 +74,17 @@ class InitialSetupView(APIView):
             },
         }
 
-        if needs_onboarding:
+        if not needs_onboarding:
+            logger.info(f"InitialSetupView response: {response}")
+            return Response(response)
+
+        # 🎧 REAL ONBOARDING (tylko jeśli NIE ma integracji)
+        if needs_integration:
             if not profile.onboarding_started_at:
                 profile.onboarding_started_at = timezone.now()
                 profile.save(update_fields=["onboarding_started_at"])
 
-            tracks = self._get_coldstart_tracks(limit=self.TRACKS_PER_BATCH)  # Pass the limit here
+            tracks = self._get_coldstart_tracks(limit=self.TRACKS_PER_BATCH)
             response["tracks"] = ColdStartTrackSerializer(tracks, many=True).data
 
         logger.info(f"InitialSetupView response: {response}")
@@ -129,7 +120,7 @@ class InitialSetupView(APIView):
             if len(selected) >= limit:
                 break
 
-        # 🛟 fallback
+        # fallback
         if len(selected) < limit:
             selected = list(qs[:limit])
 
@@ -158,6 +149,35 @@ class OnboardingInteractView(APIView):
     MAX_EVENTS_PER_BATCH = 20
     MIN_LIKES_TO_COMPLETE = 3
 
+    def _apply_onboarding_like(self, user, track):
+        """
+        Build user taste profile from liked onboarding track.
+        V2: simple copy TrackTag → UserTag
+        """
+        logger.info(f"DEBUG: _apply_onboarding_like called for user={user.id}, track={track.id}")
+
+        tags = TrackTag.objects.filter(
+            track=track,
+            source="computed",
+            is_active=True
+        )
+
+        logger.info(f"DEBUG: Found {tags.count()} TrackTags")
+
+        for tt in tags:
+            logger.info(f"DEBUG: Processing tag={tt.tag}, weight={tt.weight}")
+            UserTag.objects.update_or_create(
+                user=user,
+                tag=tt.tag,
+                source="onboarding",
+                defaults={
+                    "weight": tt.weight,
+                    "confidence": 0.7,
+                    "is_active": True,
+                }
+            )
+        logger.info(f"DEBUG: UserTag created")
+
     def post(self, request):
         user = request.user
         profile = user.profile
@@ -185,13 +205,9 @@ class OnboardingInteractView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        serializer = OnboardingEventSerializer(
-            data=events_data,
-            many=True,
-        )
+        serializer = OnboardingEventSerializer(data=events_data, many=True)
         serializer.is_valid(raise_exception=True)
 
-        # mark onboarding start once
         if not profile.onboarding_started_at:
             profile.onboarding_started_at = timezone.now()
             profile.save(update_fields=["onboarding_started_at"])
@@ -231,14 +247,24 @@ class OnboardingInteractView(APIView):
 
                 if created:
                     events_written += 1
+                    # Apply taste profile for new LIKE events
+                    if event_data["action"] == OnboardingEvent.Action.LIKE:
+                        self._apply_onboarding_like(
+                            user=user,
+                            track=cold_start_track.track
+                        )
                     continue
 
-                # update only if changed
                 updated_fields = []
+                action_changed_to_like = False
 
                 if event.action != event_data["action"]:
                     event.action = event_data["action"]
                     updated_fields.append("action")
+
+                    # Check if action changed TO like
+                    if event_data["action"] == OnboardingEvent.Action.LIKE:
+                        action_changed_to_like = True
 
                 if (
                         event_data.get("position") is not None
@@ -250,6 +276,13 @@ class OnboardingInteractView(APIView):
                 if updated_fields:
                     event.save(update_fields=updated_fields)
                     events_written += 1
+
+                    # Apply taste profile if action changed to LIKE
+                    if action_changed_to_like:
+                        self._apply_onboarding_like(
+                            user=user,
+                            track=cold_start_track.track
+                        )
                 else:
                     events_ignored += 1
 
@@ -285,7 +318,6 @@ class OnboardingInteractView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        # 🔁 ENDLESS MODE
         return Response(
             {
                 "status": "needs_more_likes",
@@ -297,6 +329,7 @@ class OnboardingInteractView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
 @method_decorator(cache_page(10), name="get")
 class UserStatus(APIView):
     permission_classes = [permissions.IsAuthenticated]
