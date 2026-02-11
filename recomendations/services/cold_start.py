@@ -139,22 +139,47 @@ def cold_start_fetch_spotify_global(self):
 
             tracks_cache = save_tracks_bulk(tracks_data)
 
+            track_scores = {}
             for rank, track_data in enumerate(tracks_data, start=1):
                 track = tracks_cache.get(track_data["id"])
                 if not track:
                     continue
+                track_scores[track.id] = {
+                    "rank": rank,
+                    "score": 1.0 - (rank - 1) / 50,
+                }
 
-                ColdStartTrack.objects.update_or_create(
-                    track=track,
+            # 1. Update existing
+            existing = ColdStartTrack.objects.filter(
+                track_id__in=track_scores.keys(),
+                source=ColdStartTrack.Source.SPOTIFY_GLOBAL,
+            )
+            to_update = []
+            existing_track_ids = set()
+
+            for cs in existing:
+                cs.rank = track_scores[cs.track_id]["rank"]
+                cs.score = track_scores[cs.track_id]["score"]
+                to_update.append(cs)
+                existing_track_ids.add(cs.track_id)
+
+            if to_update:
+                ColdStartTrack.objects.bulk_update(to_update, ['rank', 'score'])
+
+            # 2. Create new
+            to_create = [
+                ColdStartTrack(
+                    track_id=track_id,
                     source=ColdStartTrack.Source.SPOTIFY_GLOBAL,
-                    defaults={
-                        "rank": rank,
-                        "score": 1.0 - (rank - 1) / 50,
-                    },
+                    rank=data["rank"],
+                    score=data["score"],
                 )
+                for track_id, data in track_scores.items()
+                if track_id not in existing_track_ids
+            ]
 
-            logger.info(f"Cold start Spotify GLOBAL – finished ({len(tracks_data)} tracks)")
-            return f"Spotify: {len(tracks_data)} tracks"
+            if to_create:
+                ColdStartTrack.objects.bulk_create(to_create, ignore_conflicts=True)
 
     except ResourceLockedException:
         logger.info("Spotify GLOBAL cold start already running – skipped")

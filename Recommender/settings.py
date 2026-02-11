@@ -101,14 +101,12 @@ WSGI_APPLICATION = 'Recommender.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': config('DB_NAME'),
-        'USER': config('DB_USER'),
-        'PASSWORD': config('DB_PASSWORD'),
-        'HOST': config('DB_HOST'),
-        'PORT': '5432',
-        'OPTIONS': {
-            'sslmode': 'require',
-        },
+        'NAME': os.environ.get('POSTGRES_DB', 'recommender'),
+        'USER': os.environ.get('POSTGRES_USER', 'recommender'),
+        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'recommender'),
+        'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
+        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
+        'CONN_MAX_AGE': 60,
     }
 }
 
