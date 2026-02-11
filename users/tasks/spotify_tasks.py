@@ -533,16 +533,18 @@ def fetch_playlist_tracks(self, playlist_id):
 
 def save_artists_bulk(artists_data):
     """
-    Bulk save/update artists z genres
-    - Tworzy nowych artystów
-    - Aktualizuje istniejących (popularity, image_url)
-    - Dodaje brakujące gatunki (ale nie usuwa starych)
+    OPTIMIZED: Bulk save/update artists with genres
+
+    Key optimizations:
+    1. Use artist IDs instead of spotify_ids for M2M lookup
+    2. Batch genre processing
+    3. Minimize database queries
     """
     if not artists_data:
         return
 
     spotify_ids = [a['id'] for a in artists_data]
-
+    has_any_genres = any(a.get("genres") for a in artists_data)
     # ============================================
     # 1. SPRAWDŹ KTÓRZY ARTYŚCI ISTNIEJĄ
     # ============================================
@@ -555,8 +557,15 @@ def save_artists_bulk(artists_data):
     # ============================================
     # 2. BULK CREATE/UPDATE GENRES
     # ============================================
+    # Skip genre processing if no artists have genres
+    artists_with_genres = [a for a in artists_data if a.get("genres")]
+
+    if not artists_with_genres:
+        # Track artists often don't include genres - skip M2M entirely
+        return
+
     all_genres = set()
-    for artist in artists_data:
+    for artist in artists_with_genres:
         all_genres.update(artist.get("genres", []))
 
     if all_genres:
@@ -629,12 +638,15 @@ def save_artists_bulk(artists_data):
         for a in Artist.objects.filter(spotify_id__in=spotify_ids)
     }
 
+    # ✅ OPTIMIZATION: Get artist DB IDs upfront
+    artist_db_ids = [a.id for a in artists_cache.values()]
+
     # ============================================
     # 6. POBIERZ ISTNIEJĄCE RELACJE ARTIST↔GENRE
     # ============================================
     existing_relations = set(
         Artist.genres.through.objects
-        .filter(artist__spotify_id__in=spotify_ids)
+        .filter(artist_id__in=artist_db_ids)  # ← CHANGED: Use IDs
         .values_list('artist_id', 'genre_id')
     )
 
@@ -651,7 +663,6 @@ def save_artists_bulk(artists_data):
         for genre_name in item.get("genres", []):
             genre = genres_cache.get(genre_name)
             if genre:
-                # ✅ Dodaj tylko jeśli relacja nie istnieje
                 if (artist.id, genre.id) not in existing_relations:
                     artist_genre_relations.append(
                         Artist.genres.through(
@@ -663,8 +674,10 @@ def save_artists_bulk(artists_data):
     if artist_genre_relations:
         Artist.genres.through.objects.bulk_create(
             artist_genre_relations,
-            ignore_conflicts=True
+            ignore_conflicts=True,
+            batch_size=500  # ✅ Added batch size
         )
+
 
 def save_artists(artists_data):
     """
