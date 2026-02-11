@@ -11,7 +11,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv()
 
 # ---------------------- API KEY --------------------------
-LAST_FM_API_KEY=os.getenv("LAST_FM_API_KEY")
+LASTFM_API_KEY=os.getenv("LASTFM_API_KEY")
 
 # ---------------------- SECURITY / DEBUG ----------------------
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-change-me")
