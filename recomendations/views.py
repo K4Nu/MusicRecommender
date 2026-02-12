@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions, status
 from recomendations.models import ColdStartTrack,UserTag
-from music.models import TrackTag
+from music.models import TrackTag, ArtistTag
 from .tasks.cold_start_tasks import create_cold_start_lastfm_tracks
 from .services.cold_start import cold_start_refresh_all
 from django.db import IntegrityError, transaction
@@ -152,31 +152,74 @@ class OnboardingInteractView(APIView):
     def _apply_onboarding_like(self, user, track):
         """
         Build user taste profile from liked onboarding track.
-        V2: simple copy TrackTag → UserTag
-        """
-        logger.info(f"DEBUG: _apply_onboarding_like called for user={user.id}, track={track.id}")
 
-        tags = TrackTag.objects.filter(
-            track=track,
-            source="computed",
-            is_active=True
+        Priority:
+        1. TrackTag (strongest signal)
+        2. ArtistTag (fallback)
+        """
+
+        logger.info(
+            f"DEBUG: _apply_onboarding_like called for user={user.id}, track={track.id}"
         )
 
-        logger.info(f"DEBUG: Found {tags.count()} TrackTags")
+        # ==========================================
+        # 1️⃣ PRIMARY: TrackTag
+        # ==========================================
+        track_tags = TrackTag.objects.filter(
+            track=track,
+            is_active=True,
+        )
 
-        for tt in tags:
-            logger.info(f"DEBUG: Processing tag={tt.tag}, weight={tt.weight}")
-            UserTag.objects.update_or_create(
-                user=user,
-                tag=tt.tag,
-                source="onboarding",
-                defaults={
-                    "weight": tt.weight,
-                    "confidence": 0.7,
-                    "is_active": True,
-                }
-            )
-        logger.info(f"DEBUG: UserTag created")
+        if track_tags.exists():
+            logger.info(f"DEBUG: Using {track_tags.count()} TrackTags")
+
+            for tt in track_tags:
+                UserTag.objects.update_or_create(
+                    user=user,
+                    tag=tt.tag,
+                    source="onboarding_track",
+                    defaults={
+                        "weight": tt.weight,
+                        "confidence": 0.7,
+                        "is_active": True,
+                    },
+                )
+
+            logger.info("DEBUG: UserTag created from TrackTag")
+            return
+
+        # ==========================================
+        # 2️⃣ FALLBACK: ArtistTag
+        # ==========================================
+        artist_tags = ArtistTag.objects.filter(
+            artist__in=track.artists.all(),
+            is_active=True,
+        )
+
+        if artist_tags.exists():
+            logger.info(f"DEBUG: Track has no tags. Using {artist_tags.count()} ArtistTags")
+
+            for at in artist_tags:
+                UserTag.objects.update_or_create(
+                    user=user,
+                    tag=at.tag,
+                    source="onboarding_artist_fallback",
+                    defaults={
+                        "weight": at.weight * 0.8,  # slightly weaker signal
+                        "confidence": 0.5,
+                        "is_active": True,
+                    },
+                )
+
+            logger.info("DEBUG: UserTag created from ArtistTag fallback")
+            return
+
+        # ==========================================
+        #NO SIGNAL
+        # ==========================================
+        logger.warning(
+            f"WARNING: No TrackTag or ArtistTag found for track={track.id}"
+        )
 
     def post(self, request):
         user = request.user

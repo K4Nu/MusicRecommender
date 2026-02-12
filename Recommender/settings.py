@@ -106,9 +106,12 @@ DATABASES = {
         'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'recommender'),
         'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
         'PORT': os.environ.get('POSTGRES_PORT', '5432'),
-        'CONN_MAX_AGE': 60,
+        'CONN_MAX_AGE': 0,
     }
 }
+
+CELERY_WORKER_POOL = 'eventlet'
+CELERY_WORKER_CONCURRENCY = 50
 
 # ---------------------- PASSWORD VALIDATORS ----------------------
 AUTH_PASSWORD_VALIDATORS = [

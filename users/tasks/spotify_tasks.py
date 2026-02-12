@@ -533,20 +533,21 @@ def fetch_playlist_tracks(self, playlist_id):
 
 def save_artists_bulk(artists_data):
     """
-    OPTIMIZED: Bulk save/update artists with genres
+    Bulk save/update artists with genres.
 
-    Key optimizations:
-    1. Use artist IDs instead of spotify_ids for M2M lookup
-    2. Batch genre processing
-    3. Minimize database queries
+    FIXED: Early return for 'no genres' was placed BEFORE artist creation,
+    causing 1061+ tracks to have no linked artists.
+    Now early return is AFTER artist creation, only skipping genre M2M.
     """
     if not artists_data:
         return
 
-    spotify_ids = [a['id'] for a in artists_data]
-    has_any_genres = any(a.get("genres") for a in artists_data)
+    spotify_ids = [a['id'] for a in artists_data if a.get('id')]
+    if not spotify_ids:
+        return
+
     # ============================================
-    # 1. SPRAWDŹ KTÓRZY ARTYŚCI ISTNIEJĄ
+    # 1. CHECK EXISTING ARTISTS
     # ============================================
     existing_artists = {
         a.spotify_id: a
@@ -555,127 +556,116 @@ def save_artists_bulk(artists_data):
     existing_ids = set(existing_artists.keys())
 
     # ============================================
-    # 2. BULK CREATE/UPDATE GENRES
+    # 2. BULK CREATE NEW ARTISTS
     # ============================================
-    # Skip genre processing if no artists have genres
-    artists_with_genres = [a for a in artists_data if a.get("genres")]
+    to_create = [
+        Artist(
+            spotify_id=item["id"],
+            name=item["name"],
+            popularity=item.get("popularity"),
+            image_url=item["images"][0]["url"] if item.get("images") else None,
+        )
+        for item in artists_data
+        if item.get("id") and item["id"] not in existing_ids
+    ]
 
-    if not artists_with_genres:
-        # Track artists often don't include genres - skip M2M entirely
+    if to_create:
+        Artist.objects.bulk_create(to_create, ignore_conflicts=True)
+
+    # ============================================
+    # 3. BULK UPDATE EXISTING ARTISTS
+    # ============================================
+    to_update = []
+    for item in artists_data:
+        if not item.get("id") or item["id"] not in existing_ids:
+            continue
+        # Only update if we have full data (genres or images = full artist object)
+        if not (item.get("genres") or item.get("images")):
+            continue
+        artist = existing_artists[item["id"]]
+        artist.name = item["name"]
+        artist.popularity = item.get("popularity")
+        artist.image_url = item["images"][0]["url"] if item.get("images") else None
+        to_update.append(artist)
+
+    if to_update:
+        Artist.objects.bulk_update(
+            to_update,
+            ['name', 'popularity', 'image_url'],
+            batch_size=100,
+        )
+
+    # ============================================
+    # Skip genre M2M if no artist has genre data
+    # (track/album artist objects from Spotify never include genres)
+    # ============================================
+    has_any_genres = any(a.get("genres") for a in artists_data)
+    if not has_any_genres:
         return
 
+    # ============================================
+    # 4. REFRESH CACHE (needed for genre M2M)
+    # ============================================
+    artists_cache = {
+        a.spotify_id: a
+        for a in Artist.objects.filter(spotify_id__in=spotify_ids)
+    }
+    artist_db_ids = [a.id for a in artists_cache.values()]
+
+    # ============================================
+    # 5. BULK CREATE/UPDATE GENRES
+    # ============================================
     all_genres = set()
-    for artist in artists_with_genres:
-        all_genres.update(artist.get("genres", []))
+    for item in artists_data:
+        all_genres.update(item.get("genres", []))
 
     if all_genres:
         existing_genre_names = set(
             Genre.objects.filter(name__in=all_genres).values_list("name", flat=True)
         )
-
         new_genres = [
             Genre(name=genre)
             for genre in all_genres
             if genre not in existing_genre_names
         ]
-
         if new_genres:
             Genre.objects.bulk_create(new_genres, ignore_conflicts=True)
 
-    # Cache wszystkich gatunków
     genres_cache = {
         g.name: g
         for g in Genre.objects.filter(name__in=all_genres)
     }
 
     # ============================================
-    # 3. BULK CREATE NOWYCH ARTYSTÓW
-    # ============================================
-    to_create = []
-    for item in artists_data:
-        if item["id"] not in existing_ids:
-            to_create.append(
-                Artist(
-                    spotify_id=item["id"],
-                    name=item["name"],
-                    popularity=item.get("popularity"),
-                    image_url=item["images"][0]["url"] if item.get("images") else None,
-                )
-            )
-
-    if to_create:
-        Artist.objects.bulk_create(to_create, ignore_conflicts=True)
-
-    # ============================================
-    # 4. BULK UPDATE ISTNIEJĄCYCH ARTYSTÓW
-    # ============================================
-    to_update = []
-    for item in artists_data:
-        if item["id"] in existing_ids:
-            artist = existing_artists[item["id"]]
-            is_full_artist = bool(item.get("genres") or item.get("images"))
-            if not is_full_artist:
-                continue
-
-            artist.name = item["name"]
-            artist.popularity = item.get("popularity")
-            artist.image_url = item["images"][0]["url"] if item.get("images") else None
-
-            to_update.append(artist)
-
-    if to_update:
-        Artist.objects.bulk_update(
-            to_update,
-            ['name', 'popularity', 'image_url'],
-            batch_size=100
-        )
-
-    # ============================================
-    # 5. ODŚWIEŻ CACHE ARTYSTÓW (po create/update)
-    # ============================================
-    artists_cache = {
-        a.spotify_id: a
-        for a in Artist.objects.filter(spotify_id__in=spotify_ids)
-    }
-
-    # ✅ OPTIMIZATION: Get artist DB IDs upfront
-    artist_db_ids = [a.id for a in artists_cache.values()]
-
-    # ============================================
-    # 6. POBIERZ ISTNIEJĄCE RELACJE ARTIST↔GENRE
+    # 6. BULK CREATE ARTIST ↔ GENRE M2M
+    # Uses artist_id__in (fast) instead of artist__spotify_id__in (slow JOIN)
     # ============================================
     existing_relations = set(
         Artist.genres.through.objects
-        .filter(artist_id__in=artist_db_ids)  # ← CHANGED: Use IDs
+        .filter(artist_id__in=artist_db_ids)
         .values_list('artist_id', 'genre_id')
     )
 
-    # ============================================
-    # 7. BULK CREATE NOWYCH RELACJI M2M
-    # ============================================
     artist_genre_relations = []
-
     for item in artists_data:
-        artist = artists_cache.get(item["id"])
+        artist = artists_cache.get(item.get("id"))
         if not artist:
             continue
-
         for genre_name in item.get("genres", []):
             genre = genres_cache.get(genre_name)
-            if genre:
-                if (artist.id, genre.id) not in existing_relations:
-                    artist_genre_relations.append(
-                        Artist.genres.through(
-                            artist_id=artist.id,
-                            genre_id=genre.id
-                        )
+            if genre and (artist.id, genre.id) not in existing_relations:
+                artist_genre_relations.append(
+                    Artist.genres.through(
+                        artist_id=artist.id,
+                        genre_id=genre.id,
                     )
+                )
 
     if artist_genre_relations:
         Artist.genres.through.objects.bulk_create(
             artist_genre_relations,
             ignore_conflicts=True,
-            batch_size=500  # ✅ Added batch size
+            batch_size=500,
         )
 
 

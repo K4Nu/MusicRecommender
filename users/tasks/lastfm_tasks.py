@@ -1099,7 +1099,7 @@ def _create_track_from_lastfm(
 
     with transaction.atomic():
 
-        # 1️⃣ Artist (soft create)
+        # Artist (soft create)
         artist = None
         if artist_name:
             artist = Artist.objects.filter(
@@ -1113,9 +1113,9 @@ def _create_track_from_lastfm(
                     image_url=None,
                 )
 
-        # 2️⃣ Album stub (required by model)
-        album_name = f"Unknown album – {artist.name if artist else 'Unknown'}"
-
+        # Album stub (required by model)
+        album_name = f"Unknown album – {artist.name if artist else 'Unknown'} – {track_name}"
+        album = Album.objects.filter(name=album_name).first()
         album, _ = Album.objects.get_or_create(
             name=album_name,
             defaults={
@@ -1128,7 +1128,7 @@ def _create_track_from_lastfm(
         if artist:
             album.artists.add(artist)
 
-        # 3️⃣ Track stub
+        # Track stub
         track = Track.objects.create(
             name=track_name,
             album=album,
@@ -1141,7 +1141,7 @@ def _create_track_from_lastfm(
         if artist:
             track.artists.add(artist)
 
-        # 4️⃣ Last.fm cache (MINIMAL, REAL DATA)
+        # Last.fm cache (MINIMAL, REAL DATA)
         TrackLastFMData.objects.update_or_create(
             track=track,
             defaults={
@@ -1164,7 +1164,7 @@ def _create_track_from_lastfm(
         }
     )
 
-    # 5️⃣ ASYNC enrichment (REAL DATA COMES LATER)
+    # ASYNC enrichment (REAL DATA COMES LATER)
     get_track_info.delay(track.id)
 
     return track
