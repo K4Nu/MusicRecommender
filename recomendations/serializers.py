@@ -94,3 +94,17 @@ class RecommendationItemSerializer(serializers.ModelSerializer):
         ]
 
 
+class RecommendationSerializer(serializers.ModelSerializer):
+    items = RecommendationItemSerializer(many=True)
+
+    class Meta:
+        model = Recommendation
+        fields = [
+            "id",
+            "strategy",
+            "status",
+            "context",
+            "created_at",
+            "finished_at",
+            "items",
+        ]
