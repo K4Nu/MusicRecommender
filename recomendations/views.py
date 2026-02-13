@@ -385,4 +385,3 @@ class UserStatus(APIView):
             "has_spotify": SpotifyAccount.objects.filter(user=user).exists(),
             "has_youtube": YoutubeAccount.objects.filter(user=user).exists(),
         })
-
