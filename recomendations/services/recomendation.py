@@ -11,7 +11,7 @@ from recomendations.models import (
     UserTag,
     OnboardingEvent,
 )
-from music.models import Track, TrackSimilarity
+from music.models import Track, TrackSimilarity,TrackTag
 from users.models import ListeningHistory, UserTopItem, SpotifyAccount
 
 logger = logging.getLogger(__name__)
@@ -66,3 +66,35 @@ def get_user_tag_profile(user,source=None)->dict:
 
     return {tag_id: score / counts[tag_id] for tag_id, score in profile.items()}
 
+# =========================================================
+# TRACK SCORING
+# =========================================================
+
+def score_tracks_by_tags(track_ids: list, user_tag_profile: dict) -> dict:
+    """
+        Score tracks by tag overlap with user profile.
+        Returns {track_id: score}
+
+        Score = sum(user_tag_weight * track_tag_weight) for matching tags
+        Normalized to 0-1 range.
+        """
+    if not user_tag_profile:
+        return {}
+
+    tracks_tag=(
+        TrackTag.objects.filter(track_id__in=track_ids,is_active=True).values("track_id","tag_id","weight")
+    )
+    scores=defaultdict(float)
+    for tt in tracks_tag:
+        user_weight=user_tag_profile.get(tt["tag_id"],0)
+        if user_weight>0:
+            scores[tt["tag_id"]] += user_weight * tt["weight"]
+
+    if not scores:
+        return {}
+
+    max_score=max(scores.values())
+    if max_score>0:
+        scores = {tid: s / max_score for tid, s in scores.items()}
+
+    return dict(scores)
