@@ -43,3 +43,26 @@ def detect_strategy(user)->str:
         return Recommendation.RecommendationStrategy.HYBRID_START
 
     return Recommendation.RecommendationStrategy.WARM_START
+
+# =========================================================
+# USER TAG PROFILE
+# =========================================================
+def get_user_tag_profile(user,source=None)->dict:
+    """
+        Returns {tag_id: weighted_score} for the user.
+        Uses computed aggregate if available, otherwise raw sources.
+        """
+    computed=UserTag.objects.for_user(user, source="computed")
+    if computed.exists():
+        return {ut.tag_id: ut.weight * ut.confidence for ut in computed}
+
+    qs=UserTag.objects.for_user(user, source=source)
+    profile=defaultdict(float)
+    counts=defaultdict(int)
+
+    for ut in qs:
+        profile[ut.tag_id] += ut.weight * ut.confidence
+        counts[ut.tag_id] += 1
+
+    return {tag_id: score / counts[tag_id] for tag_id, score in profile.items()}
+
