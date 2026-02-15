@@ -119,3 +119,57 @@ def score_tracks_by_similarity(seed_tracks_ids:list, candidate_ids:list)->dict:
     return {
         tid:scores[tid]/counts[tid] for tid in scores
     }
+
+# =========================================================
+# CANDIDATE POOLS
+# =========================================================
+def get_cold_start_candidates()->dict:
+    """
+    Returns {track_id: cold_start_score} deduplicated by track.
+    Takes the best score when a track appears in multiple sources.
+    """
+
+    return dict(
+        ColdStartTrack.objects.values("track_id").annotate(best_score=Max("score")).order_by("track_id","best_score")
+    )
+
+def get_seed_tracks(user,limit=20)->list:
+    """
+    Seed tracks = liked onboarding + recent listening + top items
+    """
+    onboarding_ids=list(OnboardingEvent.objects.filter(user=user, action=OnboardingEvent.Action.LIKE).values("cold_start_track__track_id", flat=True))
+    history_ids=list(UserTopItem.objects.filter(user=user).order_by("-played_at").values("track_id", flat=True)[:limit])
+    top_tracks_ids=list(UserTopItem.objects.filter(user=user).order_by("rank").values_list("track_id", flat=True)[:limit])
+
+    all_ids=list(dict.fromkeys(onboarding_ids+history_ids+top_tracks_ids))
+    return all_ids[:limit]
+
+def apply_artist_diversity(scored_tracks: list, max_per_artist: int = 2) -> list:
+    """
+    Limit tracks per artist to avoid recommending the same artist too much.
+    scored_tracks = [(track_id, score, reason), ...]
+    """
+
+    tracks_ids=[t[0] for t in scored_tracks]
+    artist_map=defaultdict(list)
+
+    tracks=(
+        Track.objects.filter(id__in=tracks_ids).prefetch_related("artist")
+    )
+    track_artists={t.id:[a.id for a in t.arists.all()]for t in tracks}
+    result=[]
+    artist_counts=defaultdict(int)
+
+    for track_id, score,reason in scored_tracks:
+        artists=track_artists.get(track_id,[])
+        main_artist=artists[0] if artists else None
+
+        if main_artist and artist_counts.get(main_artist,0)>=max_per_artist:
+            continue
+
+        if main_artist:
+            artist_counts[main_artist]+=1
+
+        result.append((track_id, score, reason))
+
+    return result
