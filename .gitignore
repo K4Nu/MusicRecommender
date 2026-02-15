@@ -8,3 +8,6 @@ media/
 .idea
 htmlcov
 .coverage
+backup.json
+backup_clean.json
+backup_nobom.json

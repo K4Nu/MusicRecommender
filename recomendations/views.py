@@ -2,10 +2,11 @@ from django.shortcuts import render
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions, status
-from recomendations.models import ColdStartTrack,UserTag
+from recomendations.models import ColdStartTrack,UserTag,Recommendation
 from music.models import TrackTag, ArtistTag
 from .tasks.cold_start_tasks import create_cold_start_lastfm_tracks
 from .services.cold_start import cold_start_refresh_all
+from .services.recomendation import get_or_build_recommendation
 from django.db import IntegrityError, transaction
 from django.views.decorators.cache import cache_page
 from django.utils.decorators import method_decorator
@@ -17,7 +18,8 @@ from rest_framework import permissions
 import logging
 from users.models import SpotifyAccount, YoutubeAccount
 from recomendations.models import ColdStartTrack, OnboardingEvent
-from recomendations.serializers import ColdStartTrackSerializer,OnboardingEventSerializer
+from recomendations.serializers import ColdStartTrackSerializer,OnboardingEventSerializer, RecommendationSerializer
+
 
 class ColdTest(APIView):
     permission_classes = [permissions.AllowAny]
@@ -163,7 +165,7 @@ class OnboardingInteractView(APIView):
         )
 
         # ==========================================
-        # 1️⃣ PRIMARY: TrackTag
+        # PRIMARY: TrackTag
         # ==========================================
         track_tags = TrackTag.objects.filter(
             track=track,
@@ -189,7 +191,7 @@ class OnboardingInteractView(APIView):
             return
 
         # ==========================================
-        # 2️⃣ FALLBACK: ArtistTag
+        # FALLBACK: ArtistTag
         # ==========================================
         artist_tags = ArtistTag.objects.filter(
             artist__in=track.artists.all(),
@@ -386,3 +388,39 @@ class UserStatus(APIView):
             "has_youtube": YoutubeAccount.objects.filter(user=user).exists(),
         })
 
+class RecommendationView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+
+        if not user.profile.onboarding_completed:
+            return Response(
+                {
+                    "error": "onboarding_not_completed",
+                    "message": "Complete onboarding before getting recommendations",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        force_rebuild = request.query_params.get("rebuild", "").lower() == "true"
+
+        recommendation = get_or_build_recommendation(
+            user=user,
+            limit=20,
+            force_rebuild=force_rebuild,
+        )
+
+        #Prefetch all relations to avoid N+1
+        recommendation = (
+            Recommendation.objects
+            .prefetch_related(
+                "items__track__artists",
+                "items__track__track_tags__tag",
+                "items__track__album",
+            )
+            .get(id=recommendation.id)
+        )
+
+        serializer = RecommendationSerializer(recommendation)
+        return Response(serializer.data)
