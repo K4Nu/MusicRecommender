@@ -98,3 +98,24 @@ def score_tracks_by_tags(track_ids: list, user_tag_profile: dict) -> dict:
         scores = {tid: s / max_score for tid, s in scores.items()}
 
     return dict(scores)
+
+def score_tracks_by_similarity(seed_tracks_ids:list, candidate_ids:list)->dict:
+    """
+        Score candidate tracks by similarity to seed tracks.
+        Returns {track_id: score}
+        """
+    if not seed_tracks_ids or not candidate_ids:
+        return {}
+
+    similarities=(TrackSimilarity.objects.filter(from_track_id__in=seed_tracks_ids,to_track_id__in=candidate_ids).values("to_track_id","score"))
+
+    scores=defaultdict(float)
+    counts=defaultdict(int)
+
+    for sim in similarities:
+        scores[sim["to_track_id"]] += sim["score"]
+        counts[sim["to_track_id"]] += 1
+
+    return {
+        tid:scores[tid]/counts[tid] for tid in scores
+    }
