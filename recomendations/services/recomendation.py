@@ -352,3 +352,44 @@ def _save_recommendation(user,strategy:str,scored_tracks:list, context:dict=None
         f"items={len(items)}"
     )
     return rec
+
+# =========================================================
+# MAIN ENTRY POINT
+# =========================================================
+
+def get_or_build_recommendation(user, limit=20, force_rebuild=False) -> Recommendation:
+    """
+    Main entry point for the recommendation endpoint.
+    Auto-detects strategy, returns cached or builds fresh recommendation.
+
+    force_rebuild=True → always build fresh (used after Spotify sync)
+    """
+
+    strategy=detect_strategy(user)
+
+    if not force_rebuild:
+        existing=(Recommendation.objects.fitler(
+            user=user,
+            strategy=strategy,
+            status=Recommendation.RecommendationStatus.READY,
+        ).prefetch_related(
+            "items__track__artists",
+            "items__track__album",
+            "items__track__track_tags__tag",
+        ).first())
+
+        if existing:
+            logger.info(
+                f"Returning cached recommendation: user={user.id} "
+                f"strategy={strategy} id={existing.id}"
+            )
+            return existing
+
+    logger.info(f"Building recommendation: user={user.id} strategy={strategy}")
+
+    if strategy==Recommendation.RecommendationStrategy.COLD_START:
+        return build_cold_start_recommendation(user=user,limit=limit)
+
+    # WARM_START and HYBRID_START both use hybrid builder
+    # (warm just has less seed data, scoring handles it gracefully)
+    return build_hybrid_recommendation(user,limit=limit)
