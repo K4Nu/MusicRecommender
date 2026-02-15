@@ -19,7 +19,7 @@ from django.urls import path, include
 from users.views import SpotifyConnect,UserTopTracks,TestView,YoutubeConnect,TestLastFM
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 from debug_toolbar.toolbar import debug_toolbar_urls
-from recomendations.views import ColdTest,InitialSetupView,GetFeature, OnboardingInteractView,UserStatus
+from recomendations.views import ColdTest,InitialSetupView,GetFeature, OnboardingInteractView,UserStatus,RecommendationView
 urlpatterns = [
     path("", include("django_prometheus.urls")),
     path('admin/', admin.site.urls),
@@ -38,5 +38,7 @@ urlpatterns = [
     path("essa/",GetFeature.as_view()),
     path("api/onboarding/", OnboardingInteractView.as_view()),
     path("api/me/", UserStatus.as_view()),
+    path("api/recommendations/", RecommendationView.as_view(), name="recommendations"),
+
 
 ]+debug_toolbar_urls()
