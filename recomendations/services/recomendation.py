@@ -312,5 +312,43 @@ def build_hybrid_recommendation(user, limit=20) -> Recommendation:
         },
     )
 
+# =========================================================
+# SAVE TO DB
+# =========================================================
 
+def _save_recommendation(user,strategy:str,scored_tracks:list, context:dict=None) -> Recommendation:
+    """
+    Saves Recommendation + RecommendationItems to DB.
+    scored_tracks = [(track_id, score, reason), ...]
+    """
+    with transaction.atomic():
+        rec=Recommendation.objects.create(
+            user=user,
+            type=Recommendation.RecommendationTypes.TRACK,
+            strategy=strategy,
+            status=Recommendation.RecommendationStatus.DRAFT,
+            context=context,
+        )
 
+        items=[
+            RecommendationItem(
+                recommendation=rec,
+                type=RecommendationItem.ItemTypes.TRACK,
+                track_id=track_id,
+                score=round(score,4),
+                rank=rank,
+                reason=reason
+            )
+            for rank, (track_id, score, reason) in enumerate(scored_tracks)
+        ]
+
+        RecommendationItem.objects.bulk_create(items, ignore_conflicts=True)
+        rec.status=Recommendation.RecommendationStatus.READY
+        rec.finished_at=timezone.now()
+        rec.save(update_fields=["status", "finished_at"])
+
+    logger.info(
+        f"Recommendation built: user={user.id} strategy={strategy} "
+        f"items={len(items)}"
+    )
+    return rec
