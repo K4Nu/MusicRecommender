@@ -173,3 +173,144 @@ def apply_artist_diversity(scored_tracks: list, max_per_artist: int = 2) -> list
         result.append((track_id, score, reason))
 
     return result
+
+# =========================================================
+# RECOMMENDATION BUILDERS
+# =========================================================
+def build_cold_start_recommendation(user, limit=20) -> Recommendation:
+    """
+    Pure cold start - uses cold start pool scored by user tag profile.
+    For users who have completed onboarding but have no Spotify.
+    """
+    user_tags=get_user_tag_profile(user)
+    candidates=get_cold_start_candidates()
+    seed_ids=get_seed_tracks(user)
+
+    seen_ids=set(
+        OnboardingEvent.objects.filter(
+            user=user).values_list("cold_start_track__track_id", flat=True)
+        )
+
+    candidate_ids=[tid for tid in candidates if tid not in seen_ids]
+
+    tag_scores=score_tracks_by_tags(candidate_ids, user_tags)
+
+    sim_scores=score_tracks_by_similarity(seed_ids, candidate_ids)
+
+    #Combine scores
+    # cold_start_score: 30% (popularity signal)
+    # tag_score:        50% (taste match)
+    # sim_score:        20% (collaborative signal)
+
+    scored=[]
+    for track_id in candidate_ids:
+        cs_score=candidates.get(track_id,0)
+        tag_score=tag_scores.get(track_id,0)
+        sim_score=sim_scores.get(track_id,0)
+
+        if user_tags:
+            final_score=(cs_score*0.3)+(tag_score*0.5)+(sim_score*0.2)
+        else:
+            # No tags yet - just use cold start score
+            final_score=cs_score
+
+        reason = {
+            "cold_start_score": round(cs_score, 4),
+            "tag_score": round(tag_score, 4),
+            "sim_score": round(sim_score, 4),
+            "strategy": "cold_start",
+        }
+        scored.append((track_id, final_score, reason))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    scored=apply_artist_diversity(scored,max_per_artist=2)
+
+    scored=scored[:limit]
+
+    return _save_recommendation(
+        user=user,
+        strategy=Recommendation.RecommendationStrategy.COLD_START,
+        scored_tracks=scored,
+        context={
+            "seed_track_ids": seed_ids,
+            "user_tag_count": len(user_tags),
+            "candidate_count": len(candidate_ids),
+        },
+    )
+
+def build_hybrid_recommendation(user, limit=20) -> Recommendation:
+    """
+    Hybrid - uses cold start pool + Spotify history scored by user tags.
+    For users with Spotify connected.
+    """
+    user_tags = get_user_tag_profile(user)
+    candidates = get_cold_start_candidates()
+    seed_ids = get_seed_tracks(user, limit=50)
+
+    similar_track_ids = list(
+        TrackSimilarity.objects
+        .filter(from_track_id__in=seed_ids)
+        .order_by("-score")
+        .values_list("to_track_id", flat=True)[:200]
+    )
+
+    all_candidate_ids=list(set(list(candidates.keys())+similar_track_ids))
+
+    heard_ids = set(
+        ListeningHistory.objects
+        .filter(user=user)
+        .values_list("track_id", flat=True)
+    )
+    heard_ids |= set(
+        UserTopItem.objects
+        .filter(user=user, item_type="tracks")
+        .values_list("track_id", flat=True)
+    )
+
+    candidate_ids = [tid for tid in all_candidate_ids if tid not in heard_ids]
+
+    # Score
+    tag_scores = score_tracks_by_tags(candidate_ids, user_tags)
+    sim_scores = score_tracks_by_similarity(seed_ids, candidate_ids)
+
+    candidate_ids = [tid for tid in all_candidate_ids if tid not in heard_ids]
+
+    # Score
+    tag_scores = score_tracks_by_tags(candidate_ids, user_tags)
+    sim_scores = score_tracks_by_similarity(seed_ids, candidate_ids)
+
+    scored = []
+    for track_id in candidate_ids:
+        cs_score = candidates.get(track_id, 0)
+        tag_score = tag_scores.get(track_id, 0)
+        sim_score = sim_scores.get(track_id, 0)
+
+    final_score = (cs_score * 0.2) + (tag_score * 0.4) + (sim_score * 0.4)
+
+    reason = {
+        "cold_start_score": round(cs_score, 4),
+        "tag_score": round(tag_score, 4),
+        "sim_score": round(sim_score, 4),
+        "strategy": "hybrid",
+    }
+    scored.append((track_id, final_score, reason))
+
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    scored = apply_artist_diversity(scored, max_per_artist=2)
+    scored = scored[:limit]
+
+    return _save_recommendation(
+        user=user,
+        strategy=Recommendation.RecommendationStrategy.HYBRID_START,
+        scored_tracks=scored,
+        context={
+            "seed_track_ids": seed_ids[:10],
+            "user_tag_count": len(user_tags),
+            "candidate_count": len(candidate_ids),
+            "heard_excluded": len(heard_ids),
+        },
+    )
+
+
+
