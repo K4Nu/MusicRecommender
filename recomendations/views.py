@@ -19,7 +19,8 @@ import logging
 from users.models import SpotifyAccount, YoutubeAccount
 from recomendations.models import ColdStartTrack, OnboardingEvent
 from recomendations.serializers import ColdStartTrackSerializer,OnboardingEventSerializer, RecommendationSerializer
-
+from recomendations.services.tag_filter import filter_track_tags, filter_artist_tags
+from recomendations.tasks.recommendation_tasks import build_recommendation_task
 
 class ColdTest(APIView):
     permission_classes = [permissions.AllowAny]
@@ -167,9 +168,8 @@ class OnboardingInteractView(APIView):
         # ==========================================
         # PRIMARY: TrackTag
         # ==========================================
-        track_tags = TrackTag.objects.filter(
-            track=track,
-            is_active=True,
+        track_tags = filter_track_tags(
+            TrackTag.objects.filter(track=track)
         )
 
         if track_tags.exists():
@@ -193,9 +193,10 @@ class OnboardingInteractView(APIView):
         # ==========================================
         # FALLBACK: ArtistTag
         # ==========================================
-        artist_tags = ArtistTag.objects.filter(
-            artist__in=track.artists.all(),
-            is_active=True,
+        artist_tags = filter_artist_tags(
+            ArtistTag.objects.filter(
+                artist__in=track.artists.all(),
+            )
         )
 
         if artist_tags.exists():
@@ -351,6 +352,10 @@ class OnboardingInteractView(APIView):
                 "onboarding_completed_at",
                 "onboarding_quality",
             ])
+
+            UserTag.objects.recompute_computed(user)
+
+            build_recommendation_task.delay(user.id)
 
             return Response(
                 {

@@ -3,6 +3,18 @@ from django.db import models
 
 User = get_user_model()
 
+class RecommendationManager(models.Manager):
+    def ready(self):
+        return self.filter(
+            status=self.model.RecommendationStatus.READY
+        )
+    def for_user(self, user):
+        return self.filter(user=user)
+    def active_for_user(self, user, strategy=None):
+        qs = self.ready().filter(user=user, is_active=True)
+        if strategy:
+            qs = qs.filter(strategy=strategy)
+        return qs.first()
 
 class Recommendation(models.Model):
     class RecommendationTypes(models.TextChoices):
@@ -41,18 +53,25 @@ class Recommendation(models.Model):
         default=RecommendationStatus.DRAFT,
     )
 
-    # opcjonalne, ale bardzo przyszłościowe
     context = models.JSONField(
         null=True,
         blank=True,
         help_text="Context used to generate recommendation (seed items, params, etc.)",
     )
-
+    is_active = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     finished_at = models.DateTimeField(null=True, blank=True)
 
+    objects = RecommendationManager()
+
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["user", "status", "is_active", "strategy"],
+                name="rec_user_stat_act_str_idx",
+            )
+        ]
 
     def __str__(self) -> str:
         return (
