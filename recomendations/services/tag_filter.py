@@ -69,8 +69,7 @@ BLOCKED_TAG_NAMES = {
 }
 
 # Minimum number of times a tag must be used globally to be considered valid
-MIN_TAG_USAGE_COUNT = 500
-
+MIN_TAG_USAGE_COUNT = 3
 
 def is_valid_tag(tag) -> bool:
     """
