@@ -1,8 +1,8 @@
-from django.shortcuts import render
+from django.shortcuts import render, get_object_or_404
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions, status
-from recomendations.models import ColdStartTrack,UserTag,Recommendation, RecommendationItem
+from recomendations.models import ColdStartTrack,UserTag,Recommendation, RecommendationItem, RecommendationFeedback
 from music.models import TrackTag, ArtistTag
 from .tasks.cold_start_tasks import create_cold_start_lastfm_tracks
 from .services.cold_start import cold_start_refresh_all
@@ -18,9 +18,12 @@ from rest_framework import permissions
 import logging
 from users.models import SpotifyAccount, YoutubeAccount
 from recomendations.models import ColdStartTrack, OnboardingEvent
-from recomendations.serializers import ColdStartTrackSerializer,OnboardingEventSerializer, RecommendationSerializer, HomeSerializer
+from recomendations.serializers import ColdStartTrackSerializer,OnboardingEventSerializer, RecommendationSerializer, HomeSerializer, RecommendationFeedbackSerializer
 from recomendations.services.tag_filter import filter_track_tags, filter_artist_tags
 from recomendations.tasks.recommendation_tasks import build_recommendation_task
+from django.shortcuts import get_object_or_404
+from django.db.models import Prefetch
+from .services.feedback_service import apply_feedback_to_tags
 
 class ColdTest(APIView):
     permission_classes = [permissions.AllowAny]
@@ -444,11 +447,25 @@ class HomeApiView(APIView):
 
         rec = get_or_build_recommendation(user)
 
-        all_items = RecommendationItem.objects.for_recommendation(rec)
+        # Prefetch feedback for current user - single query
+        all_items = list(
+            RecommendationItem.objects
+            .filter(recommendation=rec)
+            .select_related("track__album", "artist")
+            .prefetch_related(
+                "track__artists",
+                "track__track_tags__tag",
+                # Only prefetch feedback for current user
+                Prefetch(
+                    "feedback",
+                    queryset=RecommendationFeedback.objects.filter(user=user),
+                ),
+            )
+            .order_by("rank")
+        )
 
         top_items = all_items[:5]
         lighter_items = all_items[5:10]
-
         profile_tags = UserTag.objects.top_tags(user=user, limit=5)
 
         return Response(
@@ -459,3 +476,92 @@ class HomeApiView(APIView):
                 "lighter_items": lighter_items,
             }).data
         )
+
+class RecommendationFeedbackView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    TOP_ITEMS_COUNT = 5  # rebuild when all top items are rated
+
+    def post(self, request):
+        serializer = RecommendationFeedbackSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+        item_id = serializer.validated_data["recommendation_item_id"]
+        action = serializer.validated_data["action"]
+
+        # 1️⃣ Get item with relations
+        item = get_object_or_404(
+            RecommendationItem.objects.select_related(
+                "recommendation",
+                "track",
+            ),
+            id=item_id,
+        )
+
+        # 2️⃣ Security: verify ownership
+        if item.recommendation.user_id != user.id:
+            return Response(
+                {"error": "invalid_recommendation_item"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # 3️⃣ Save feedback (update if exists)
+        feedback, created = RecommendationFeedback.objects.update_or_create(
+            user=user,
+            recommendation_item=item,
+            defaults={
+                "recommendation": item.recommendation,
+                "action": action,
+            },
+        )
+
+        # 4️⃣ Update user taste profile
+        apply_feedback_to_tags(user=user, item=item, action=action)
+
+        # 5️⃣ Rebuild only if needed and snapshot still active
+        should_rebuild = False
+
+        if item.recommendation.is_active:
+            should_rebuild = self._check_should_rebuild(
+                user=user,
+                recommendation=item.recommendation,
+            )
+
+            if should_rebuild:
+                build_recommendation_task.delay(
+                    user.id,
+                    force_rebuild=True,
+                )
+
+        return Response(
+            {
+                "status": "created" if created else "updated",
+                "action": feedback.action,
+                "rebuild_triggered": should_rebuild,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def _check_should_rebuild(self, user, recommendation) -> bool:
+        """
+        Returns True when all top items (rank < TOP_ITEMS_COUNT)
+        in the current active snapshot have feedback.
+        """
+
+        top_qs = RecommendationItem.objects.filter(
+            recommendation=recommendation,
+            rank__lt=self.TOP_ITEMS_COUNT,
+        )
+
+        top_count = top_qs.count()
+
+        if top_count == 0:
+            return False
+
+        rated_count = RecommendationFeedback.objects.filter(
+            user=user,
+            recommendation_item__in=top_qs,
+        ).count()
+
+        return rated_count >= top_count

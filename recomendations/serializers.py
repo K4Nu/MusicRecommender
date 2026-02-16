@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from recomendations.models import ColdStartTrack, OnboardingEvent,RecommendationItem,Recommendation, UserTag
+from recomendations.models import ColdStartTrack, OnboardingEvent,RecommendationItem,Recommendation, UserTag, RecommendationFeedback
 
 class ColdStartTrackSerializer(serializers.ModelSerializer):
     track_name = serializers.CharField(source="track.name")
@@ -23,7 +23,6 @@ class ColdStartTrackSerializer(serializers.ModelSerializer):
     def get_embed_url(self, obj):
         return f"https://open.spotify.com/embed/track/{obj.track.spotify_id}"
 
-
 class OnboardingEventSerializer(serializers.Serializer):
     cold_start_track_id = serializers.IntegerField()
     action = serializers.ChoiceField(
@@ -42,6 +41,7 @@ class OnboardingEventSerializer(serializers.Serializer):
         return value
 
 class RecommendationItemSerializer(serializers.ModelSerializer):
+    user_feedback = serializers.SerializerMethodField()
     track_name = serializers.CharField(source="track.name", default=None)
     spotify_id = serializers.CharField(source="track.spotify_id", default=None)
     preview_url = serializers.CharField(source="track.preview_url", default=None)
@@ -70,6 +70,7 @@ class RecommendationItemSerializer(serializers.ModelSerializer):
             "artists",
             "tags",
             "reason",
+            "user_feedback",
         ]
 
     def get_embed_url(self, obj):
@@ -93,6 +94,13 @@ class RecommendationItemSerializer(serializers.ModelSerializer):
             for tt in obj.track.track_tags.all()[:5]
         ]
 
+    def get_user_feedback(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return None
+
+        feedback = obj.feedback.filter(user=request.user).first()
+        return feedback.action if feedback else None
 
 class RecommendationSerializer(serializers.ModelSerializer):
     items = RecommendationItemSerializer(many=True)
@@ -131,3 +139,10 @@ class HomeSerializer(serializers.Serializer):
     profile_tags = UserTagSerializer(many=True)
     top_items = RecommendationItemSerializer(many=True)
     lighter_items = RecommendationItemSerializer(many=True)
+
+class RecommendationFeedbackSerializer(serializers.Serializer):
+    recommendation_item_id = serializers.IntegerField()
+    action = serializers.ChoiceField(
+        choices=RecommendationFeedback.Action.choices
+    )
+
