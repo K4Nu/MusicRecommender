@@ -2,6 +2,27 @@ from django.db import models
 from users.models import Track, Artist
 from .recommendation import Recommendation
 
+class RecommendationItemManager(models.Manager):
+
+    def for_recommendation(self, recommendation):
+        return (
+            self.filter(recommendation=recommendation)
+            .select_related("track", "artist")
+        )
+
+    def top_n(self, recommendation, limit=3):
+        return (
+            self.for_recommendation(recommendation)
+            .order_by("rank")[:limit]
+        )
+
+    def lighter(self, recommendation, start_rank=5, limit=3):
+        return (
+            self.for_recommendation(recommendation)
+            .filter(rank__gte=start_rank)
+            .order_by("rank")[:limit]
+        )
+
 
 class RecommendationItem(models.Model):
     class ItemTypes(models.TextChoices):
@@ -50,6 +71,8 @@ class RecommendationItem(models.Model):
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = RecommendationItemManager()
 
     class Meta:
         ordering = ["rank"]
