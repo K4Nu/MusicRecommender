@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from recomendations.models import ColdStartTrack, OnboardingEvent,RecommendationItem,Recommendation, UserTag
+from recomendations.models import ColdStartTrack, OnboardingEvent,RecommendationItem,Recommendation, UserTag, RecommendationFeedback
 
 class ColdStartTrackSerializer(serializers.ModelSerializer):
     track_name = serializers.CharField(source="track.name")
@@ -131,3 +131,10 @@ class HomeSerializer(serializers.Serializer):
     profile_tags = UserTagSerializer(many=True)
     top_items = RecommendationItemSerializer(many=True)
     lighter_items = RecommendationItemSerializer(many=True)
+
+class RecommendationFeedbackSerializer(serializers.Serializer):
+    recommendation_item_id = serializers.IntegerField()
+    action = serializers.ChoiceField(
+        choices=RecommendationFeedback.Action.choices
+    )
+
