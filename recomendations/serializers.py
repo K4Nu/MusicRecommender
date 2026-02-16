@@ -23,7 +23,6 @@ class ColdStartTrackSerializer(serializers.ModelSerializer):
     def get_embed_url(self, obj):
         return f"https://open.spotify.com/embed/track/{obj.track.spotify_id}"
 
-
 class OnboardingEventSerializer(serializers.Serializer):
     cold_start_track_id = serializers.IntegerField()
     action = serializers.ChoiceField(
@@ -93,6 +92,11 @@ class RecommendationItemSerializer(serializers.ModelSerializer):
             for tt in obj.track.track_tags.all()[:5]
         ]
 
+    def get_user_feedback(self, obj):
+        try:
+            return obj.feedback.all()[0].action
+        except IndexError:
+            return None
 
 class RecommendationSerializer(serializers.ModelSerializer):
     items = RecommendationItemSerializer(many=True)
