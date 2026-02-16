@@ -19,6 +19,7 @@ import logging
 from users.models import SpotifyAccount, YoutubeAccount
 from recomendations.models import ColdStartTrack, OnboardingEvent
 from recomendations.serializers import ColdStartTrackSerializer,OnboardingEventSerializer, RecommendationSerializer
+from recomendations.services.tag_filter import filter_track_tags, filter_artist_tags
 
 
 class ColdTest(APIView):
@@ -167,9 +168,8 @@ class OnboardingInteractView(APIView):
         # ==========================================
         # PRIMARY: TrackTag
         # ==========================================
-        track_tags = TrackTag.objects.filter(
-            track=track,
-            is_active=True,
+        track_tags = filter_track_tags(
+            TrackTag.objects.filter(track=track)
         )
 
         if track_tags.exists():
@@ -193,9 +193,10 @@ class OnboardingInteractView(APIView):
         # ==========================================
         # FALLBACK: ArtistTag
         # ==========================================
-        artist_tags = ArtistTag.objects.filter(
-            artist__in=track.artists.all(),
-            is_active=True,
+        artist_tags = filter_artist_tags(
+            ArtistTag.objects.filter(
+                artist__in=track.artists.all(),
+            )
         )
 
         if artist_tags.exists():
