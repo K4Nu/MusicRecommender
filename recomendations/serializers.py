@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from recomendations.models import ColdStartTrack, OnboardingEvent,RecommendationItem,Recommendation
+from recomendations.models import ColdStartTrack, OnboardingEvent,RecommendationItem,Recommendation, UserTag
 
 class ColdStartTrackSerializer(serializers.ModelSerializer):
     track_name = serializers.CharField(source="track.name")
@@ -108,3 +108,26 @@ class RecommendationSerializer(serializers.ModelSerializer):
             "finished_at",
             "items",
         ]
+
+class UserTagSerializer(serializers.ModelSerializer):
+    tag_name = serializers.CharField(source="tag.name")
+    tag_id = serializers.IntegerField(source="tag.id")
+
+    class Meta:
+        model = UserTag
+        fields = [
+            "tag_id",
+            "tag_name",
+            "weight",
+        ]
+
+
+class HomeSerializer(serializers.Serializer):
+    """
+    Combines profile taste tags + top recommendation items + lighter items.
+    Used by HomeApiView.
+    """
+    strategy = serializers.CharField()
+    profile_tags = UserTagSerializer(many=True)
+    top_items = RecommendationItemSerializer(many=True)
+    lighter_items = RecommendationItemSerializer(many=True)

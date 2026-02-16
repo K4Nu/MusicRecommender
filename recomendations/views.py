@@ -2,11 +2,11 @@ from django.shortcuts import render
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions, status
-from recomendations.models import ColdStartTrack,UserTag,Recommendation
+from recomendations.models import ColdStartTrack,UserTag,Recommendation, RecommendationItem
 from music.models import TrackTag, ArtistTag
 from .tasks.cold_start_tasks import create_cold_start_lastfm_tracks
 from .services.cold_start import cold_start_refresh_all
-from .services.recomendation import get_or_build_recommendation
+from .services.recomendation import get_or_build_recommendation, detect_strategy
 from django.db import IntegrityError, transaction
 from django.views.decorators.cache import cache_page
 from django.utils.decorators import method_decorator
@@ -18,7 +18,7 @@ from rest_framework import permissions
 import logging
 from users.models import SpotifyAccount, YoutubeAccount
 from recomendations.models import ColdStartTrack, OnboardingEvent
-from recomendations.serializers import ColdStartTrackSerializer,OnboardingEventSerializer, RecommendationSerializer
+from recomendations.serializers import ColdStartTrackSerializer,OnboardingEventSerializer, RecommendationSerializer, HomeSerializer
 from recomendations.services.tag_filter import filter_track_tags, filter_artist_tags
 from recomendations.tasks.recommendation_tasks import build_recommendation_task
 
@@ -429,3 +429,33 @@ class RecommendationView(APIView):
 
         serializer = RecommendationSerializer(recommendation)
         return Response(serializer.data)
+
+class HomeApiView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+
+        if not user.profile.onboarding_completed:
+            return Response(
+                {"error": "onboarding_not_completed"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        rec = get_or_build_recommendation(user)
+
+        all_items = RecommendationItem.objects.for_recommendation(rec)
+
+        top_items = all_items[:5]
+        lighter_items = all_items[5:10]
+
+        profile_tags = UserTag.objects.top_tags(user=user, limit=5)
+
+        return Response(
+            HomeSerializer({
+                "strategy": rec.strategy,
+                "profile_tags": profile_tags,
+                "top_items": top_items,
+                "lighter_items": lighter_items,
+            }).data
+        )
