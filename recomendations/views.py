@@ -20,7 +20,7 @@ from users.models import SpotifyAccount, YoutubeAccount
 from recomendations.models import ColdStartTrack, OnboardingEvent
 from recomendations.serializers import ColdStartTrackSerializer,OnboardingEventSerializer, RecommendationSerializer
 from recomendations.services.tag_filter import filter_track_tags, filter_artist_tags
-
+from recomendations.tasks.recommendation_tasks import build_recommendation_task
 
 class ColdTest(APIView):
     permission_classes = [permissions.AllowAny]
@@ -352,6 +352,10 @@ class OnboardingInteractView(APIView):
                 "onboarding_completed_at",
                 "onboarding_quality",
             ])
+
+            UserTag.objects.recompute_computed(user)
+
+            build_recommendation_task.delay(user.id)
 
             return Response(
                 {
