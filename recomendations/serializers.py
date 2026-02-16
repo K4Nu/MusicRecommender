@@ -41,6 +41,7 @@ class OnboardingEventSerializer(serializers.Serializer):
         return value
 
 class RecommendationItemSerializer(serializers.ModelSerializer):
+    user_feedback = serializers.SerializerMethodField()
     track_name = serializers.CharField(source="track.name", default=None)
     spotify_id = serializers.CharField(source="track.spotify_id", default=None)
     preview_url = serializers.CharField(source="track.preview_url", default=None)
@@ -69,6 +70,7 @@ class RecommendationItemSerializer(serializers.ModelSerializer):
             "artists",
             "tags",
             "reason",
+            "user_feedback",
         ]
 
     def get_embed_url(self, obj):
@@ -93,10 +95,12 @@ class RecommendationItemSerializer(serializers.ModelSerializer):
         ]
 
     def get_user_feedback(self, obj):
-        try:
-            return obj.feedback.all()[0].action
-        except IndexError:
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
             return None
+
+        feedback = obj.feedback.filter(user=request.user).first()
+        return feedback.action if feedback else None
 
 class RecommendationSerializer(serializers.ModelSerializer):
     items = RecommendationItemSerializer(many=True)
