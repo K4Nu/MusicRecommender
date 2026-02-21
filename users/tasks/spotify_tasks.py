@@ -94,7 +94,7 @@ def fetch_top_items(headers, item_type, time_range, user_id):
         items = data.get('items', [])
         logger.info(f"Fetched {len(items)} top {item_type} ({time_range}) for user {user_id}")
 
-        user = User.objects.get(id=user_id)  # ✅ .get() zamiast .filter()
+        user = User.objects.get(id=user_id)
 
         UserTopItem.objects.filter(
             user=user,
@@ -287,7 +287,7 @@ def sync_user_playlists(user_id):
         with ResourceLock("playlists_sync",user_id, timeout=900):
             changed_playlists = fetch_spotify_playlists(user_id)
             if not changed_playlists:
-                spotify_sync_finished.delay(user_id)
+                spotify_sync_finished.delay([],user_id)
                 return
             chord(
                 fetch_playlist_tracks.s(pid)
@@ -325,6 +325,11 @@ def fetch_spotify_playlists(user_id):
 
     while url:
         response = requests.get(url, headers=headers, params={"limit": 50})
+
+        if response.status_code==403:
+            logger.warning(
+                f"403 Forbidden fetching playlists for user {user.id} — likely missing scopes, needs re-auth")
+            return []
 
         if response.status_code == 304:
             spotify.last_synced_at = timezone.now()
