@@ -22,7 +22,7 @@ INTERNAL_IPS = ["127.0.0.1", "localhost"]
 # Frontend: 127.0.0.1:5173 – keep host consistent
 CORS_ALLOWED_ORIGINS = ["http://127.0.0.1:5173"]
 # CORS_ALLOW_CREDENTIALS defaults to False — no need to set explicitly
-
+FRONTEND_URL = "http://127.0.0.1:5173"
 # ---------------------- DJANGO CORE ----------------------
 INSTALLED_APPS = [
     # Django
@@ -42,14 +42,11 @@ INSTALLED_APPS = [
 
     # Third-party
     "corsheaders",
+    "django_extensions",
     "rest_framework",
     "rest_framework_simplejwt",
     "drf_spectacular",
     "drf_spectacular_sidecar",  # Uncomment only if you want local Swagger UI assets
-    "allauth",
-    "allauth.account",
-    "allauth.socialaccount",
-    "allauth.socialaccount.providers.spotify",
     "djoser",
     "debug_toolbar",
     'django_celery_beat',
@@ -72,7 +69,6 @@ MIDDLEWARE = [
     "Recommender.middleware.JWTAuthCookieMiddleware",
     "debug_toolbar.middleware.DebugToolbarMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "allauth.account.middleware.AccountMiddleware",
     "django_prometheus.middleware.PrometheusAfterMiddleware",
 ]
 
@@ -138,7 +134,6 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "users.User"
 AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",
-    "allauth.account.auth_backends.AuthenticationBackend",
 ]
 
 
@@ -156,6 +151,7 @@ REST_FRAMEWORK = {
 
 DJOSER = {
     "LOGIN_FIELD": "email",
+    "PASSWORD_RESET_CONFIRM_URL": "reset-password/{uid}/{token}",
     "SERIALIZERS": {
         "user_create": "users.serializers.CustomRegisterSerializer",
         "user": "users.serializers.CustomRegisterSerializer",
@@ -174,14 +170,6 @@ SIMPLE_JWT = {
 
 
 # ---------------------- ALLAUTH / SOCIAL ----------------------
-ACCOUNT_AUTHENTICATION_METHOD = "email"
-ACCOUNT_EMAIL_REQUIRED = True
-ACCOUNT_USERNAME_REQUIRED = False
-ACCOUNT_EMAIL_VERIFICATION = "optional"  # change to 'mandatory' in production
-ACCOUNT_CONFIRM_EMAIL_ON_GET = True
-ACCOUNT_LOGOUT_ON_GET = True
-SOCIALACCOUNT_LOGIN_ON_GET = True
-
 SOCIALACCOUNT_PROVIDERS = {
     "spotify": {
         "APP": {
@@ -201,11 +189,6 @@ SOCIALACCOUNT_PROVIDERS = {
     }
 }
 
-LOGIN_URL = "auth/jwt/create"
-LOGIN_REDIRECT_URL = "/"
-ACCOUNT_LOGOUT_REDIRECT_URL = "/"
-
-
 # ---------------------- SPECTACULAR / SWAGGER ----------------------
 SPECTACULAR_SETTINGS = {
     "TITLE": "Music Recommender",
@@ -216,9 +199,6 @@ SPECTACULAR_SETTINGS = {
     "SWAGGER_UI_FAVICON_HREF": "SIDECAR",
     "REDOC_DIST": "SIDECAR",
 }
-
-
-
 
 # ---------------------- EMAIL (DEV) ----------------------
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"

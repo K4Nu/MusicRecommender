@@ -27,7 +27,6 @@ urlpatterns = [
     path("auth/youtube/connect/",YoutubeConnect.as_view()),
     path("auth/", include("djoser.urls")),
     path("auth/", include("djoser.urls.jwt")),
-    path("auth/social/", include("allauth.socialaccount.urls")),
     path("user/top_track/", UserTopTracks.as_view()),
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     path('api/schema/swagger-ui/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),

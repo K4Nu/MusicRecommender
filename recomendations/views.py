@@ -444,6 +444,12 @@ class HomeApiView(APIView):
                 {"error": "onboarding_not_completed"},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        spotify = SpotifyAccount.objects.filter(user=user).first()
+
+        is_spotify_connected = (
+                spotify is not None and
+                spotify.refresh_token is not None
+        )
 
         rec = get_or_build_recommendation(user)
 
@@ -474,6 +480,7 @@ class HomeApiView(APIView):
                 "profile_tags": profile_tags,
                 "top_items": top_items,
                 "lighter_items": lighter_items,
+                "is_spotify_connected":is_spotify_connected,
             }).data
         )
 
@@ -490,7 +497,7 @@ class RecommendationFeedbackView(APIView):
         item_id = serializer.validated_data["recommendation_item_id"]
         action = serializer.validated_data["action"]
 
-        # 1️⃣ Get item with relations
+        # Get item with relations
         item = get_object_or_404(
             RecommendationItem.objects.select_related(
                 "recommendation",
@@ -499,14 +506,14 @@ class RecommendationFeedbackView(APIView):
             id=item_id,
         )
 
-        # 2️⃣ Security: verify ownership
+        #  Security: verify ownership
         if item.recommendation.user_id != user.id:
             return Response(
                 {"error": "invalid_recommendation_item"},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # 3️⃣ Save feedback (update if exists)
+        # Save feedback (update if exists)
         feedback, created = RecommendationFeedback.objects.update_or_create(
             user=user,
             recommendation_item=item,
@@ -516,10 +523,10 @@ class RecommendationFeedbackView(APIView):
             },
         )
 
-        # 4️⃣ Update user taste profile
+        # Update user taste profile
         apply_feedback_to_tags(user=user, item=item, action=action)
 
-        # 5️⃣ Rebuild only if needed and snapshot still active
+        #  Rebuild only if needed and snapshot still active
         should_rebuild = False
 
         if item.recommendation.is_active:
@@ -565,3 +572,4 @@ class RecommendationFeedbackView(APIView):
         ).count()
 
         return rated_count >= top_count
+
