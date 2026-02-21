@@ -139,6 +139,7 @@ class HomeSerializer(serializers.Serializer):
     profile_tags = UserTagSerializer(many=True)
     top_items = RecommendationItemSerializer(many=True)
     lighter_items = RecommendationItemSerializer(many=True)
+    is_spotify_connected=serializers.BooleanField()
 
 class RecommendationFeedbackSerializer(serializers.Serializer):
     recommendation_item_id = serializers.IntegerField()
