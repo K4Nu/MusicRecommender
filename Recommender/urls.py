@@ -16,7 +16,7 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from users.views import SpotifyConnect,UserTopTracks,TestView,YoutubeConnect,TestLastFM
+from users.views import SpotifyConnect,UserTopTracks,TestView,YoutubeConnect,TestLastFM,SpotifyAccountDisconnect, DeleteAccountView
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 from debug_toolbar.toolbar import debug_toolbar_urls
 from recomendations.views import ColdTest,InitialSetupView,GetFeature, OnboardingInteractView,UserStatus,HomeApiView, RecommendationFeedbackView
@@ -38,7 +38,9 @@ urlpatterns = [
     path("api/onboarding/", OnboardingInteractView.as_view()),
     path("api/me/", UserStatus.as_view()),
     path("api/home/", HomeApiView.as_view(), name="home"),
-    path("api/feedback/", RecommendationFeedbackView.as_view())
+    path("api/feedback/", RecommendationFeedbackView.as_view()),
+    path("auth/spotify/disconnect/",SpotifyAccountDisconnect.as_view()),
+    path("auth/delete-account/", DeleteAccountView.as_view()),
 
 
 ]+debug_toolbar_urls()

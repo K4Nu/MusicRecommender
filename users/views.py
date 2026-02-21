@@ -332,3 +332,45 @@ class TestLastFM(APIView):
              "message":"GIT",
              "status":200}
         )
+
+class SpotifyAccountDisconnect(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request):
+        spotify_account=SpotifyAccount.objects.get(user=self.request.user)
+        if not spotify_account:
+            return Response(
+                {"detail": "No spotify account found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        spotify_account.delete()
+        return Response(
+            {"message":"The account has been deleted"},
+        )
+
+
+class DeleteAccountView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request):
+        password = request.data.get("password")
+
+        if not password:
+            return Response(
+                {"detail": "Password required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        #password check
+        if not request.user.check_password(password):
+            return Response(
+                {"detail": "Incorrect password"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        request.user.delete()
+
+        return Response(
+            {"detail": "Account deleted"},
+            status=status.HTTP_204_NO_CONTENT,
+        )
