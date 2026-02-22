@@ -3,13 +3,13 @@ from collections import defaultdict
 from django.utils import timezone
 from django.db import transaction
 from django.db.models import Max
-
 from recomendations.models import (
     Recommendation,
     RecommendationItem,
     ColdStartTrack,
     UserTag,
     OnboardingEvent,
+    RecommendationFeedback,
 )
 from music.models import Track, TrackSimilarity, TrackTag
 from users.models import ListeningHistory, UserTopItem, SpotifyAccount
@@ -138,10 +138,29 @@ def score_tracks_by_similarity(seed_track_ids: list, candidate_ids: list) -> dic
 
     return {tid: scores[tid] / counts[tid] for tid in scores}
 
-
 # =========================================================
 # CANDIDATE POOLS
 # =========================================================
+def get_already_rated_track_ids(user) -> set:
+    return set(
+        RecommendationFeedback.objects
+        .filter(user=user)
+        .values_list("recommendation_item__track_id", flat=True)
+    )
+
+def get_previously_recommended_track_ids(user, strategy) -> set:
+    """
+    Returns all track_ids that were ever recommended
+    to this user for given strategy.
+    """
+    return set(
+        RecommendationItem.objects
+        .filter(
+            recommendation__user=user,
+            recommendation__strategy=strategy,
+        )
+        .values_list("track_id", flat=True)
+    )
 
 def get_cold_start_candidates() -> dict:
     """Returns {track_id: best_score} deduplicated across sources."""
@@ -219,6 +238,9 @@ def apply_artist_diversity(scored_tracks: list, max_per_artist: int = 2) -> list
 # RECOMMENDATION BUILDERS
 # =========================================================
 def _precompute_reason_data(candidate_ids, seed_ids, user_tags):
+    if not candidate_ids:
+        return {}, {}
+
     matched_tags_map = defaultdict(list)
 
     track_tags_qs = (
@@ -235,31 +257,32 @@ def _precompute_reason_data(candidate_ids, seed_ids, user_tags):
 
     for tt in track_tags_qs:
         if user_tags.get(tt.tag_id, 0) > 0:
-            if len(matched_tags_map[tt.track_id]) < 3:  # 🔥 limit
+            if len(matched_tags_map[tt.track_id]) < 3:
                 matched_tags_map[tt.track_id].append(tt.tag.name)
 
     similar_to_map = defaultdict(list)
 
-    seed_track_names = dict(
-        Track.objects.filter(id__in=seed_ids)
-        .values_list("id", "name")
-    )
+    if seed_ids:
+        seed_track_names = dict(
+            Track.objects.filter(id__in=seed_ids)
+            .values_list("id", "name")
+        )
 
-    sims_qs = (
-        TrackSimilarity.objects
-        .filter(from_track_id__in=seed_ids, to_track_id__in=candidate_ids)
-        .values("from_track_id", "to_track_id", "score")
-        .order_by("-score")
-    )
+        sims_qs = (
+            TrackSimilarity.objects
+            .filter(from_track_id__in=seed_ids, to_track_id__in=candidate_ids)
+            .order_by("-score")
+            .values("from_track_id", "to_track_id", "score")
+        )
 
-    for sim in sims_qs:
-        if len(similar_to_map[sim["to_track_id"]]) < 2:
-            name = seed_track_names.get(sim["from_track_id"])
-            if name:
-                similar_to_map[sim["to_track_id"]].append({
-                    "track_name": name,
-                    "score": round(sim["score"], 4),
-                })
+        for sim in sims_qs:
+            if len(similar_to_map[sim["to_track_id"]]) < 2:
+                name = seed_track_names.get(sim["from_track_id"])
+                if name:
+                    similar_to_map[sim["to_track_id"]].append({
+                        "track_name": name,
+                        "score": round(sim["score"], 4),
+                    })
 
     return matched_tags_map, similar_to_map
 
@@ -268,13 +291,44 @@ def build_cold_start_recommendation(user, limit=20) -> Recommendation:
     candidates = get_cold_start_candidates()
     seed_ids = get_seed_tracks(user)
 
+    strategy = Recommendation.RecommendationStrategy.COLD_START
+
+    # 🔹 onboarding already seen
     seen_ids = set(
         OnboardingEvent.objects
         .filter(user=user)
         .values_list("cold_start_track__track_id", flat=True)
     )
 
-    candidate_ids = [tid for tid in candidates if tid not in seen_ids]
+    # 🔹 already rated
+    rated_ids = get_already_rated_track_ids(user)
+
+    # 🔹 previously recommended (NEW)
+    previous_ids = get_previously_recommended_track_ids(user, strategy)
+
+    excluded_ids = seen_ids | rated_ids | previous_ids
+
+    candidate_ids = [
+        tid for tid in candidates.keys()
+        if tid not in excluded_ids
+    ]
+
+    # Fallback if pool exhausted
+    if not candidate_ids:
+        logger.warning(f"Cold start pool exhausted for user={user.id}. Resetting previous_ids.")
+        excluded_ids = seen_ids | rated_ids
+        candidate_ids = [
+            tid for tid in candidates.keys()
+            if tid not in excluded_ids
+        ]
+
+    if not candidate_ids:
+        return _save_recommendation(
+            user=user,
+            strategy=strategy,
+            scored_tracks=[],
+            context={"reason": "no_candidates_after_filtering"},
+        )
 
     tag_scores = score_tracks_by_tags(candidate_ids, user_tags)
     sim_scores = score_tracks_by_similarity(seed_ids, candidate_ids)
@@ -290,13 +344,11 @@ def build_cold_start_recommendation(user, limit=20) -> Recommendation:
         tag_score = tag_scores.get(track_id, 0)
         sim_score = sim_scores.get(track_id, 0)
 
-        if user_tags:
-            final_score = (cs_score * 0.3) + (tag_score * 0.5) + (sim_score * 0.2)
-        else:
-            final_score = cs_score
-
-        matched = matched_tags_map.get(track_id, [])
-        similar_to = similar_to_map.get(track_id, [])
+        final_score = (
+            (cs_score * 0.3) +
+            (tag_score * 0.5) +
+            (sim_score * 0.2)
+        ) if user_tags else cs_score
 
         reason = {
             "strategy": "cold_start",
@@ -307,8 +359,8 @@ def build_cold_start_recommendation(user, limit=20) -> Recommendation:
                 "final": round(final_score, 4),
             },
             "signals": {
-                "matched_tags": matched,
-                "similar_to": similar_to,
+                "matched_tags": matched_tags_map.get(track_id, []),
+                "similar_to": similar_to_map.get(track_id, []),
             }
         }
 
@@ -320,12 +372,13 @@ def build_cold_start_recommendation(user, limit=20) -> Recommendation:
 
     return _save_recommendation(
         user=user,
-        strategy=Recommendation.RecommendationStrategy.COLD_START,
+        strategy=strategy,
         scored_tracks=scored,
         context={
             "seed_track_ids": seed_ids,
             "user_tag_count": len(user_tags),
             "candidate_count": len(candidate_ids),
+            "excluded_count": len(excluded_ids),
         },
     )
 
@@ -334,6 +387,8 @@ def build_hybrid_recommendation(user, limit=20) -> Recommendation:
     candidates = get_cold_start_candidates()
     seed_ids = get_seed_tracks(user, limit=50)
 
+    strategy = Recommendation.RecommendationStrategy.HYBRID_START
+
     similar_track_ids = list(
         TrackSimilarity.objects
         .filter(from_track_id__in=seed_ids)
@@ -341,20 +396,50 @@ def build_hybrid_recommendation(user, limit=20) -> Recommendation:
         .values_list("to_track_id", flat=True)[:200]
     )
 
-    all_candidate_ids = list(set(list(candidates.keys()) + similar_track_ids))
+    all_candidate_ids = set(candidates.keys()) | set(similar_track_ids)
 
+    # 🔹 already heard
     heard_ids = set(
         ListeningHistory.objects
         .filter(user=user)
         .values_list("track_id", flat=True)
     )
+
     heard_ids |= set(
         UserTopItem.objects
         .filter(user=user, item_type="tracks")
         .values_list("track_id", flat=True)
     )
 
-    candidate_ids = [tid for tid in all_candidate_ids if tid not in heard_ids]
+    # 🔹 already rated
+    rated_ids = get_already_rated_track_ids(user)
+
+    # 🔹 previously recommended (NEW)
+    previous_ids = get_previously_recommended_track_ids(user, strategy)
+
+    excluded_ids = heard_ids | rated_ids | previous_ids
+
+    candidate_ids = [
+        tid for tid in all_candidate_ids
+        if tid not in excluded_ids
+    ]
+
+    # Fallback if pool exhausted
+    if not candidate_ids:
+        logger.warning(f"Hybrid pool exhausted for user={user.id}. Resetting previous_ids.")
+        excluded_ids = heard_ids | rated_ids
+        candidate_ids = [
+            tid for tid in all_candidate_ids
+            if tid not in excluded_ids
+        ]
+
+    if not candidate_ids:
+        return _save_recommendation(
+            user=user,
+            strategy=strategy,
+            scored_tracks=[],
+            context={"reason": "no_candidates_after_filtering"},
+        )
 
     tag_scores = score_tracks_by_tags(candidate_ids, user_tags)
     sim_scores = score_tracks_by_similarity(seed_ids, candidate_ids)
@@ -370,10 +455,11 @@ def build_hybrid_recommendation(user, limit=20) -> Recommendation:
         tag_score = tag_scores.get(track_id, 0)
         sim_score = sim_scores.get(track_id, 0)
 
-        final_score = (cs_score * 0.2) + (tag_score * 0.4) + (sim_score * 0.4)
-
-        matched = matched_tags_map.get(track_id, [])
-        similar_to = similar_to_map.get(track_id, [])
+        final_score = (
+            (cs_score * 0.2) +
+            (tag_score * 0.4) +
+            (sim_score * 0.4)
+        )
 
         reason = {
             "strategy": "hybrid",
@@ -384,8 +470,8 @@ def build_hybrid_recommendation(user, limit=20) -> Recommendation:
                 "final": round(final_score, 4),
             },
             "signals": {
-                "matched_tags": matched,
-                "similar_to": similar_to,
+                "matched_tags": matched_tags_map.get(track_id, []),
+                "similar_to": similar_to_map.get(track_id, []),
             }
         }
 
@@ -397,17 +483,15 @@ def build_hybrid_recommendation(user, limit=20) -> Recommendation:
 
     return _save_recommendation(
         user=user,
-        strategy=Recommendation.RecommendationStrategy.HYBRID_START,
+        strategy=strategy,
         scored_tracks=scored,
         context={
             "seed_track_ids": seed_ids[:10],
             "user_tag_count": len(user_tags),
             "candidate_count": len(candidate_ids),
-            "heard_excluded": len(heard_ids),
+            "excluded_count": len(excluded_ids),
         },
     )
-
-
 # =========================================================
 # SAVE TO DB
 # =========================================================
@@ -468,32 +552,111 @@ def _save_recommendation(
 # MAIN ENTRY POINT
 # =========================================================
 
+PREBUILD_THRESHOLD = 0.8
+
+
 def get_or_build_recommendation(user, limit=20, force_rebuild=False) -> Recommendation:
     """
-    Main entry point for the recommendation endpoint.
-    Auto-detects strategy, returns cached or builds fresh recommendation.
+    Main entry point for recommendation retrieval.
 
-    force_rebuild=True → always build fresh (used after Spotify sync)
+    Behaviour:
+    - If no active → build new
+    - If ≥80% consumed → prebuild next in background
+    - If 100% consumed → switch to prebuilt instantly
+    - force_rebuild=True → always build fresh active
     """
+
     strategy = detect_strategy(user)
 
-    if not force_rebuild:
-        existing = Recommendation.objects.active_for_user(
-            user=user,
-            strategy=strategy,
-        )
-        if existing:
-            logger.info(
-                f"Returning cached recommendation: user={user.id} "
-                f"strategy={strategy} id={existing.id}"
+    # FORCE REBUILD
+    if force_rebuild:
+        logger.info(f"Force rebuilding recommendation: user={user.id}")
+        if strategy == Recommendation.RecommendationStrategy.COLD_START:
+            return build_cold_start_recommendation(user=user, limit=limit)
+        return build_hybrid_recommendation(user=user, limit=limit)
+
+    active = Recommendation.objects.active_for_user(
+        user=user,
+        strategy=strategy,
+    )
+
+    # No active → build fresh
+    if not active:
+        logger.info(f"No active recommendation. Building new for user={user.id}")
+        if strategy == Recommendation.RecommendationStrategy.COLD_START:
+            return build_cold_start_recommendation(user=user, limit=limit)
+        return build_hybrid_recommendation(user=user, limit=limit)
+
+    # Count usage
+    total_items = RecommendationItem.objects.filter(
+        recommendation=active
+    ).count()
+
+    if total_items == 0:
+        return active
+
+    rated_items = RecommendationFeedback.objects.filter(
+        recommendation=active,
+        user=user,
+    ).count()
+
+    ratio = rated_items / total_items
+
+    # 100% consumed → SWITCH TO PREBUILT
+
+    if rated_items >= total_items:
+        logger.info(f"Recommendation fully consumed: user={user.id}")
+
+        next_rec = (
+            Recommendation.objects
+            .filter(
+                user=user,
+                strategy=strategy,
+                is_active=False,
+                status=Recommendation.RecommendationStatus.READY,
             )
-            return existing
+            .order_by("-created_at")
+            .first()
+        )
 
-    logger.info(f"Building recommendation: user={user.id} strategy={strategy}")
+        if next_rec:
+            with transaction.atomic():
+                active.is_active = False
+                active.save(update_fields=["is_active"])
 
-    if strategy == Recommendation.RecommendationStrategy.COLD_START:
-        return build_cold_start_recommendation(user=user, limit=limit)
+                next_rec.is_active = True
+                next_rec.save(update_fields=["is_active"])
 
-    # WARM_START and HYBRID_START both use hybrid builder
-    # warm just has less seed data, scoring handles it gracefully
-    return build_hybrid_recommendation(user=user, limit=limit)
+            logger.info(
+                f"Switched to prebuilt recommendation id={next_rec.id} user={user.id}"
+            )
+            return next_rec
+
+        # fallback — no prebuilt ready
+        logger.info(f"No prebuilt found. Building new for user={user.id}")
+
+        active.is_active = False
+        active.save(update_fields=["is_active"])
+
+        if strategy == Recommendation.RecommendationStrategy.COLD_START:
+            return build_cold_start_recommendation(user=user, limit=limit)
+
+        return build_hybrid_recommendation(user=user, limit=limit)
+
+    # ≥80% consumed → TRIGGER PREBUILD (async)
+    if ratio >= PREBUILD_THRESHOLD:
+        logger.info(
+            f"Triggering async prebuild: user={user.id} ratio={ratio:.2f}"
+        )
+
+        from recomendations.tasks.recommendation_tasks import build_recommendation_task
+
+        build_recommendation_task.delay(
+            user.id,
+            prebuild=True,
+        )
+    # still using current active
+    logger.info(
+        f"Returning active recommendation id={active.id} user={user.id}"
+    )
+    return active
