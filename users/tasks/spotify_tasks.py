@@ -281,6 +281,16 @@ def fetch_saved_tracks(headers, user_id):
 def spotify_sync_finished(results, user_id):
     logger.info(f"✅ FULL Spotify sync finished for user {user_id}")
 
+    from recomendations.tasks.recommendation_tasks import build_recommendation_task
+
+    # Force rebuild — przełącz z cold na hybrid
+    build_recommendation_task.delay(
+        user_id,
+        force_rebuild=True
+    )
+
+    logger.info(f"🔥 Triggered HYBRID rebuild for user {user_id}")
+
 @shared_task
 def sync_user_playlists(user_id):
     try:
@@ -498,7 +508,7 @@ def fetch_playlist_tracks(self, playlist_id):
                     if not track_id:
                         continue
 
-                    # 🔒 deduplikacja globalna (cała playlista)
+                    # deduplikacja globalna (cała playlista)
                     if track_id in seen_track_ids:
                         continue
                     seen_track_ids.add(track_id)
