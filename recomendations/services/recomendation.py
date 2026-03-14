@@ -393,7 +393,7 @@ def build_hybrid_recommendation(user, limit=20) -> Recommendation:
         TrackSimilarity.objects
         .filter(from_track_id__in=seed_ids)
         .order_by("-score")
-        .values_list("to_track_id", flat=True)[:200]
+        .values_list("to_track_id", flat=True)[:500]
     )
 
     all_candidate_ids = set(candidates.keys()) | set(similar_track_ids)
