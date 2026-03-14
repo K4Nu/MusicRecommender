@@ -80,19 +80,17 @@ class UserTag(models.Model):
         related_name="tagged_users"
     )
 
-    # Siła preferencji (0–1)
     weight = models.FloatField(
         validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
     )
 
-    # Jak bardzo ufamy temu sygnałowi
     confidence = models.FloatField(
         default=1.0,
         validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
     )
 
     source = models.CharField(
-        max_length=20,
+        max_length=50,
         choices=SOURCE_CHOICES,
         db_index=True
     )

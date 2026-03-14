@@ -18,9 +18,15 @@ from utils.locks import ResourceLock, ResourceLockedException
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
-LASTFM_TOP_ARTISTS = 40
-LASTFM_TRACKS_PER_ARTIST = 2
-SPOTIFY_MATCH_LIMIT = 60
+LASTFM_TOP_ARTISTS = 100
+LASTFM_TRACKS_PER_ARTIST = 5
+SPOTIFY_MATCH_LIMIT = 500
+
+SPOTIFY_RECOMMENDATION_GENRES = [
+    "pop", "hip-hop", "rock", "latin", "indie", "r-n-b",
+    "country", "edm", "dance", "alternative", "jazz", "classical",
+    "metal", "soul", "reggaeton", "k-pop",
+]
 
 
 # =========================================================
@@ -66,9 +72,9 @@ def cold_start_fetch_spotify_global(self):
             logger.info("Spotify GLOBAL – started")
 
             try:
-                user = User.objects.get(email="adam@onet.pl")
+                user=User.objects.filter(spotifyaccount__isnull=False).first()
             except User.DoesNotExist:
-                logger.error("Cold start user adam@onet.pl not found")
+                logger.error("Cold start user not found")
                 return "Spotify: user not found"
 
             token = ensure_spotify_token(user)
@@ -78,39 +84,80 @@ def cold_start_fetch_spotify_global(self):
 
             headers = {"Authorization": f"Bearer {token.access_token}"}
 
-            resp = requests.get(
-                "https://api.spotify.com/v1/playlists/5ABHKGoOzxkaa28ttQV9sE/tracks",
-                headers=headers,
-                params={"limit": 50, "market": "US"},
-                timeout=15,
-            )
-            resp.raise_for_status()
+            all_tracks_data = []
+            seen_spotify_ids = set()
 
-            tracks_data = [
-                item["track"]
-                for item in resp.json().get("items", [])
-                if item.get("track") and not item["track"].get("is_local")
-            ]
+            # 1. Top 50 Global playlist (reliable, always works)
+            try:
+                resp = requests.get(
+                    "https://api.spotify.com/v1/playlists/5ABHKGoOzxkaa28ttQV9sE/items",
+                    headers=headers,
+                    params={"limit": 50},
+                    timeout=15,
+                )
+                resp.raise_for_status()
 
-            if not tracks_data:
-                logger.warning("No tracks found in Spotify playlist")
+                for item in resp.json().get("items", []):
+                    track = item.get("track")
+                    if not track or track.get("is_local"):
+                        continue
+                    sid = track.get("id")
+                    if sid and sid not in seen_spotify_ids:
+                        seen_spotify_ids.add(sid)
+                        all_tracks_data.append(track)
+
+                logger.info(f"Top 50 Global: {len(all_tracks_data)} tracks")
+            except requests.RequestException as e:
+                logger.warning(f"Top 50 Global playlist failed: {e}")
+
+            # 2. Recommendations API - 100 tracks per genre seed
+            for genre in SPOTIFY_RECOMMENDATION_GENRES:
+                try:
+                    resp = requests.get(
+                        "https://api.spotify.com/v1/recommendations",
+                        headers=headers,
+                        params={
+                            "seed_genres": genre,
+                            "limit": 100,
+                            "min_popularity": 40,
+                        },
+                        timeout=15,
+                    )
+                    resp.raise_for_status()
+
+                    count = 0
+                    for track in resp.json().get("tracks", []):
+                        sid = track.get("id")
+                        if sid and sid not in seen_spotify_ids:
+                            seen_spotify_ids.add(sid)
+                            all_tracks_data.append(track)
+                            count += 1
+
+                    logger.debug(f"Recommendations '{genre}': {count} new tracks")
+                except requests.RequestException as e:
+                    logger.warning(f"Recommendations for genre '{genre}' failed: {e}")
+                    continue
+
+            if not all_tracks_data:
+                logger.warning("No tracks found from Spotify")
                 return "Spotify: no tracks"
 
-            tracks_cache = save_tracks_bulk(tracks_data)
+            tracks_cache = save_tracks_bulk(all_tracks_data)
+            total = len(all_tracks_data)
 
             track_scores = {}
-            for rank, td in enumerate(tracks_data, start=1):
+            for rank, td in enumerate(all_tracks_data, start=1):
                 track = tracks_cache.get(td["id"])
                 if track:
                     track_scores[track.id] = {
                         "rank": rank,
-                        "score": round(1.0 - (rank - 1) / 50, 4),
+                        "score": round(1.0 - (rank - 1) / total, 4),
                     }
 
             _bulk_upsert_cold_start(track_scores, ColdStartTrack.Source.SPOTIFY_GLOBAL)
 
-            logger.info(f"Spotify GLOBAL – finished ({len(tracks_data)} tracks)")
-            return f"Spotify: {len(tracks_data)} tracks"
+            logger.info(f"Spotify GLOBAL – finished ({total} unique tracks from {len(SPOTIFY_RECOMMENDATION_GENRES)} genres)")
+            return f"Spotify: {total} tracks"
 
     except ResourceLockedException:
         logger.info("Spotify GLOBAL already running – skipped")
@@ -159,9 +206,9 @@ def cold_start_fetch_lastfm_global(self):
             logger.info("LastFM GLOBAL – started")
 
             try:
-                user = User.objects.get(email="adam@onet.pl")
+                user=User.objects.filter(spotifyaccount__isnull=False).first()
             except User.DoesNotExist:
-                logger.error("Cold start user adam@onet.pl not found")
+                logger.error("Cold start user not found")
                 return "LastFM: user not found"
 
             token = ensure_spotify_token(user)
