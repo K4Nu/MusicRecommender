@@ -49,15 +49,25 @@ class OnboardingEventSerializer(serializers.Serializer):
             )
         return value
 
+LASTFM_PLACEHOLDER_HASH = "2a96cbd8b46e442fc41c2b86b821562f"
+
+
+def _clean_image(url):
+    """Return None if url is the LastFM placeholder."""
+    if url and LASTFM_PLACEHOLDER_HASH not in url:
+        return url
+    return None
+
+
 class RecommendationItemSerializer(serializers.ModelSerializer):
     user_feedback = serializers.SerializerMethodField()
     track_name = serializers.CharField(source="track.name", default=None)
     spotify_id = serializers.CharField(source="track.spotify_id", default=None)
     preview_url = serializers.CharField(source="track.preview_url", default=None)
-    image_url = serializers.CharField(source="track.image_url", default=None)
+    image_url = serializers.SerializerMethodField()
     duration_ms = serializers.IntegerField(source="track.duration_ms", default=None)
-    album_name = serializers.CharField(source="track.album.name", default=None)  # ← add
-    album_image = serializers.CharField(source="track.album.image_url", default=None)  # ← add
+    album_name = serializers.CharField(source="track.album.name", default=None)
+    album_image = serializers.SerializerMethodField()
     embed_url = serializers.SerializerMethodField()
     artists = serializers.SerializerMethodField()
     tags = serializers.SerializerMethodField()
@@ -81,6 +91,21 @@ class RecommendationItemSerializer(serializers.ModelSerializer):
             "reason",
             "user_feedback",
         ]
+
+    def get_image_url(self, obj):
+        if not obj.track:
+            return None
+        img = _clean_image(obj.track.image_url)
+        if img:
+            return img
+        if obj.track.album:
+            return _clean_image(obj.track.album.image_url)
+        return None
+
+    def get_album_image(self, obj):
+        if not obj.track or not obj.track.album:
+            return None
+        return _clean_image(obj.track.album.image_url)
 
     def get_embed_url(self, obj):
         if obj.track and obj.track.spotify_id:

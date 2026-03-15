@@ -1,20 +1,18 @@
 import logging
 import os
-
 import requests
-from celery import chord, group, shared_task
+from celery import shared_task, group, chord
 from django.contrib.auth import get_user_model
-
-from music.models import Artist, Track
+from music.models import Track, Artist
 from recomendations.models import ColdStartTrack
 from users.services import ensure_spotify_token
+from users.tasks.spotify_tasks import save_tracks_bulk
 from users.tasks.lastfm_tasks import (
-    get_artist_info,
     get_similar_artists_task,
     get_similar_track_task,
+    get_artist_info,
     get_track_info,
 )
-from users.tasks.spotify_tasks import save_tracks_bulk
 from utils.locks import ResourceLock, ResourceLockedException
 
 logger = logging.getLogger(__name__)
@@ -555,3 +553,117 @@ def _bulk_upsert_cold_start(track_scores: dict, source):
         ColdStartTrack.objects.bulk_create(to_create, ignore_conflicts=True)
 
     logger.info(f"Upserted [{source}]: {len(to_create)} created, {len(to_update)} updated")
+
+def normalize_track_name(name: str) -> str:
+    if not name:
+        return name
+
+    name = re.sub(r"\(feat.*?\)", "", name, flags=re.IGNORECASE)
+
+    name = re.sub(r"\[feat.*?\]", "", name, flags=re.IGNORECASE)
+
+    name = name.replace('"', '').replace('*', '')
+
+    name = re.sub(r"\s+", " ", name)
+
+    return name.strip()
+
+@shared_task(
+    bind=True,
+    autoretry_for=(requests.RequestException,),
+    retry_backoff=5,
+    max_retries=3,
+)
+def enrich_missing_spotify_ids(self):
+
+    lock = ResourceLock("enrich_missing_spotify_ids", "spotify_global", timeout=600)
+
+    try:
+        with lock:
+            logger.info(" Enrich missing Spotify IDs – started")
+
+            tracks = (
+                Track.objects
+                .filter(spotify_id__isnull=True)
+                .prefetch_related("artists")
+                .order_by("id")[:300]  # LIMIT BATCH
+            )
+
+            if not tracks:
+                logger.info("No tracks to enrich")
+                return "No tracks"
+
+            user = User.objects.filter(spotifyaccount__isnull=False).first()
+            if not user:
+                logger.error("No Spotify user found")
+                return
+
+            token = ensure_spotify_token(user)
+            if not token:
+                logger.error("No Spotify token")
+                return
+
+            headers = {"Authorization": f"Bearer {token.access_token}"}
+
+            updated = 0
+
+            for track in tracks:
+                clean_name = normalize_track_name(track.name)
+
+                query = f'track:"{clean_name}"'
+                first_artist = track.artists.first()
+                if first_artist:
+                    query += f' artist:"{first_artist.name}"'
+
+                try:
+                    resp = requests.get(
+                        "https://api.spotify.com/v1/search",
+                        headers=headers,
+                        params={
+                            "q": query,
+                            "type": "track",
+                            "limit": 1,
+                            "market": "US",
+                        },
+                        timeout=10,
+                    )
+                    resp.raise_for_status()
+                except requests.RequestException as e:
+                    logger.warning(f"Search failed for {track.name}: {e}")
+                    continue
+
+                items = resp.json()["tracks"]["items"]
+                if not items:
+                    continue
+
+                data = items[0]
+
+                # UPDATE TRACK
+                track.spotify_id = data["id"]
+                track.preview_url = data.get("preview_url")
+                track.duration_ms = data.get("duration_ms")
+
+                album_data = data.get("album", {})
+                images = album_data.get("images")
+                if images:
+                    track.image_url = images[0]["url"]
+
+                track.save(update_fields=[
+                    "spotify_id",
+                    "preview_url",
+                    "duration_ms",
+                    "image_url",
+                ])
+
+                updated += 1
+
+            logger.info(f"✅ Enriched {updated} tracks with Spotify IDs")
+            return f"Updated {updated} tracks"
+
+    except ResourceLockedException:
+        logger.info("enrich_missing_spotify_ids already running")
+        return "Locked"
+
+
+
+

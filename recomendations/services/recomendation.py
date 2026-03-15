@@ -290,10 +290,14 @@ def _precompute_reason_data(candidate_ids, seed_ids, user_tags):
 
 def build_cold_start_recommendation(user, limit=20) -> Recommendation:
     user_tags = get_user_tag_profile(user)
-    candidates = get_cold_start_candidates()
+    cs_candidates = get_cold_start_candidates()
     seed_ids = get_seed_tracks(user)
 
     strategy = Recommendation.RecommendationStrategy.COLD_START
+
+    # Use ALL tracks as candidates — scoring filters out low-signal ones
+    all_track_ids = set(Track.objects.values_list("id", flat=True))
+    all_candidate_ids = all_track_ids | set(cs_candidates.keys())
 
     # 🔹 onboarding already seen
     seen_ids = set(
@@ -311,7 +315,7 @@ def build_cold_start_recommendation(user, limit=20) -> Recommendation:
     excluded_ids = seen_ids | rated_ids | previous_ids
 
     candidate_ids = [
-        tid for tid in candidates.keys()
+        tid for tid in all_candidate_ids
         if tid not in excluded_ids
     ]
 
@@ -320,7 +324,7 @@ def build_cold_start_recommendation(user, limit=20) -> Recommendation:
         logger.warning(f"Cold start pool exhausted for user={user.id}. Resetting previous_ids.")
         excluded_ids = seen_ids | rated_ids
         candidate_ids = [
-            tid for tid in candidates.keys()
+            tid for tid in all_candidate_ids
             if tid not in excluded_ids
         ]
 
@@ -342,7 +346,7 @@ def build_cold_start_recommendation(user, limit=20) -> Recommendation:
     scored = []
 
     for track_id in candidate_ids:
-        cs_score = candidates.get(track_id, 0)
+        cs_score = cs_candidates.get(track_id, 0)
         tag_score = tag_scores.get(track_id, 0)
         sim_score = sim_scores.get(track_id, 0)
 
@@ -351,6 +355,10 @@ def build_cold_start_recommendation(user, limit=20) -> Recommendation:
             (tag_score * 0.5) +
             (sim_score * 0.2)
         ) if user_tags else cs_score
+
+        # Skip tracks with zero signal
+        if final_score == 0:
+            continue
 
         reason = {
             "strategy": "cold_start",
@@ -386,19 +394,23 @@ def build_cold_start_recommendation(user, limit=20) -> Recommendation:
 
 def build_hybrid_recommendation(user, limit=20) -> Recommendation:
     user_tags = get_user_tag_profile(user)
-    candidates = get_cold_start_candidates()
+    cs_candidates = get_cold_start_candidates()
     seed_ids = get_seed_tracks(user, limit=50)
 
     strategy = Recommendation.RecommendationStrategy.HYBRID_START
 
-    similar_track_ids = list(
+    similar_track_ids = set(
         TrackSimilarity.objects
         .filter(from_track_id__in=seed_ids)
-        .order_by("-score")
-        .values_list("to_track_id", flat=True)[:500]
+        .values_list("to_track_id", flat=True)
     )
 
-    all_candidate_ids = set(candidates.keys()) | set(similar_track_ids)
+    # Use ALL tracks as candidates — scoring filters out low-signal ones
+    all_track_ids = set(
+        Track.objects.values_list("id", flat=True)
+    )
+
+    all_candidate_ids = all_track_ids | set(cs_candidates.keys()) | similar_track_ids
 
     # 🔹 already heard
     heard_ids = set(
@@ -453,7 +465,7 @@ def build_hybrid_recommendation(user, limit=20) -> Recommendation:
     scored = []
 
     for track_id in candidate_ids:
-        cs_score = candidates.get(track_id, 0)
+        cs_score = cs_candidates.get(track_id, 0)
         tag_score = tag_scores.get(track_id, 0)
         sim_score = sim_scores.get(track_id, 0)
 
@@ -462,6 +474,10 @@ def build_hybrid_recommendation(user, limit=20) -> Recommendation:
             (tag_score * 0.4) +
             (sim_score * 0.4)
         )
+
+        # Skip tracks with zero signal — no point recommending them
+        if final_score == 0:
+            continue
 
         reason = {
             "strategy": "hybrid",
