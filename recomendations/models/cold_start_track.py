@@ -13,6 +13,7 @@ class ColdStartTrack(models.Model):
         SPOTIFY_GLOBAL = "SPOTIFY_GLOBAL", "Spotify Global Top"
         SPOTIFY_VIRAL = "SPOTIFY_VIRAL", "Spotify Viral"
         LASTFM_GLOBAL = "LASTFM_GLOBAL", "Last.fm Global Top"
+        SPOTIFY_RELATED = "SPOTIFY_RELATED", "Spotify Related Artists"
 
     track = models.ForeignKey(
         Track,
