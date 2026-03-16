@@ -24,10 +24,11 @@ LASTFM_TOP_ARTISTS = 100
 LASTFM_TRACKS_PER_ARTIST = 5
 SPOTIFY_MATCH_LIMIT = 500
 
-# Catalog expansion via Spotify Related Artists
+# Catalog expansion via Spotify Search + Top Tracks
 EXPAND_SEED_LIMIT = 300       # Top artists by popularity to seed from
-EXPAND_BATCH_SIZE = 10        # Artists per parallel task
+EXPAND_BATCH_SIZE = 15        # Artists per parallel task (top-tracks batch)
 EXPAND_REQUEST_DELAY = 0.05   # 50ms between Spotify API calls
+SEARCH_TRACKS_PER_GENRE = 500 # Max tracks per genre search (10 pages × 50)
 
 SPOTIFY_RECOMMENDATION_GENRES = [
     "pop", "hip-hop", "rock", "latin", "indie", "r-n-b",
@@ -675,9 +676,11 @@ def enrich_missing_spotify_ids(self):
 @shared_task(bind=True)
 def expand_track_catalog(self):
     """
-    Orchestrator: fetches top 300 artists from DB, splits into
-    batches of 10, dispatches parallel tasks to fetch related
-    artists and their top tracks from Spotify.
+    Orchestrator: discovers new tracks via two parallel strategies:
+      A) Fetch top-tracks for all DB artists with a verified spotify_id
+      B) Search Spotify for tracks across multiple genres
+
+    Uses a chord so expand_catalog_save runs once ALL workers finish.
     """
     lock = ResourceLock("expand_catalog", "global", timeout=3600)
     try:
@@ -694,56 +697,100 @@ def expand_track_catalog(self):
                 logger.error("No Spotify token")
                 return "No token"
 
-            # Seed artists: top by popularity, must have spotify_id
+            access_token = token.access_token
+
+            # --- Strategy A: top-tracks for existing artists ---
             seed_artists = list(
                 Artist.objects
-                .filter(spotify_id__isnull=False)
+                .filter(
+                    spotify_id__isnull=False,
+                    popularity__isnull=False,
+                )
                 .exclude(spotify_id="")
                 .order_by("-popularity")
                 .values_list("spotify_id", flat=True)
                 [:EXPAND_SEED_LIMIT]
             )
 
-            if not seed_artists:
-                logger.warning("No seed artists found")
-                return "No seeds"
-
-            # Known artist IDs to skip (avoid re-fetching top tracks)
-            known_artist_ids = list(
-                Artist.objects
-                .filter(spotify_id__isnull=False)
-                .exclude(spotify_id="")
-                .values_list("spotify_id", flat=True)
-            )
-
-            # Split into batches
-            batches = [
+            artist_batches = [
                 seed_artists[i:i + EXPAND_BATCH_SIZE]
                 for i in range(0, len(seed_artists), EXPAND_BATCH_SIZE)
             ]
 
+            # --- Strategy B: genre search queries ---
+            genres = SPOTIFY_RECOMMENDATION_GENRES
+            search_queries = []
+            for genre in genres:
+                # Pages of 50 tracks per genre
+                for offset in range(0, SEARCH_TRACKS_PER_GENRE, 50):
+                    search_queries.append((f"genre:{genre}", offset))
+
+            # Year-range queries for more diversity
+            for year in range(2020, 2027):
+                for genre in ["pop", "hip-hop", "rock", "latin", "r-n-b",
+                              "indie", "edm", "k-pop"]:
+                    search_queries.append(
+                        (f"genre:{genre} year:{year}", 0)
+                    )
+                    search_queries.append(
+                        (f"genre:{genre} year:{year}", 50)
+                    )
+
+            # Split search queries into batches of ~8
+            search_batches = [
+                search_queries[i:i + 8]
+                for i in range(0, len(search_queries), 8)
+            ]
+
+            all_tasks = []
+
+            # Artist top-tracks tasks
+            for batch in artist_batches:
+                all_tasks.append(
+                    fetch_top_tracks_batch.s(batch, access_token)
+                )
+
+            # Genre search tasks
+            for batch in search_batches:
+                all_tasks.append(
+                    fetch_search_tracks_batch.s(batch, access_token)
+                )
+
             logger.info(
-                f"Dispatching {len(batches)} batches "
-                f"({len(seed_artists)} seed artists)"
+                f"Dispatching {len(artist_batches)} artist batches "
+                f"({len(seed_artists)} artists) + "
+                f"{len(search_batches)} search batches "
+                f"({len(search_queries)} queries across {len(genres)} genres)"
             )
 
             chord(
-                group(*[
-                    fetch_related_artists_batch.s(
-                        batch,
-                        token.access_token,
-                        known_artist_ids,
-                    )
-                    for batch in batches
-                ]),
+                group(*all_tasks),
                 expand_catalog_save.s(),
             ).delay()
 
-            return f"Dispatched {len(batches)} batches"
+            return (
+                f"Dispatched {len(all_tasks)} total tasks "
+                f"({len(artist_batches)} artist + {len(search_batches)} search)"
+            )
 
     except ResourceLockedException:
         logger.info("Expand catalog already running – skipped")
         return "Locked"
+
+
+# ---- helpers shared by worker tasks ----
+
+def _spotify_get(url, headers, params=None):
+    """GET with auto-retry on 401 (expired token)."""
+    resp = requests.get(url, headers=headers, params=params, timeout=15)
+    if resp.status_code == 401:
+        u = User.objects.filter(spotifyaccount__isnull=False).first()
+        if u:
+            t = ensure_spotify_token(u)
+            if t:
+                headers["Authorization"] = f"Bearer {t.access_token}"
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+    return resp
 
 
 @shared_task(
@@ -751,81 +798,99 @@ def expand_track_catalog(self):
     max_retries=3,
     retry_backoff=10,
 )
-def fetch_related_artists_batch(
-    artist_spotify_ids: list,
-    access_token: str,
-    known_artist_ids: list,
-):
+def fetch_top_tracks_batch(artist_spotify_ids: list, access_token: str):
     """
-    Worker task: for each seed artist, fetch related artists from
-    Spotify, then fetch top tracks for each NEW related artist.
+    Worker A: for each artist ID, fetch their top tracks from Spotify.
     Returns list of Spotify track data dicts.
     """
     headers = {"Authorization": f"Bearer {access_token}"}
-    known_set = set(known_artist_ids)
     all_tracks = []
     seen_track_ids = set()
 
-    def _refresh_headers():
-        """Re-fetch token if expired (401)."""
-        nonlocal headers
-        u = User.objects.filter(spotifyaccount__isnull=False).first()
-        if u:
-            t = ensure_spotify_token(u)
-            if t:
-                headers = {"Authorization": f"Bearer {t.access_token}"}
-
-    def _get(url, params=None):
-        """GET with auto-retry on 401."""
-        resp = requests.get(url, headers=headers, params=params, timeout=15)
-        if resp.status_code == 401:
-            _refresh_headers()
-            resp = requests.get(url, headers=headers, params=params, timeout=15)
-        resp.raise_for_status()
-        return resp.json()
-
-    for seed_id in artist_spotify_ids:
-        # 1. Related artists
+    for artist_id in artist_spotify_ids:
         try:
-            data = _get(
-                f"https://api.spotify.com/v1/artists/{seed_id}/related-artists"
+            resp = _spotify_get(
+                f"https://api.spotify.com/v1/artists/{artist_id}/top-tracks",
+                headers,
+                params={"market": "US"},
             )
-        except requests.RequestException as e:
-            logger.warning(f"Related artists failed for {seed_id}: {e}")
-            continue
-
-        related = data.get("artists", [])
-        time.sleep(EXPAND_REQUEST_DELAY)
-
-        # 2. Top tracks for each NEW related artist
-        for rel_artist in related:
-            rel_id = rel_artist.get("id")
-            if not rel_id or rel_id in known_set:
-                continue
-
-            # Mark as known so we don't fetch again in this batch
-            known_set.add(rel_id)
-
-            try:
-                top_data = _get(
-                    f"https://api.spotify.com/v1/artists/{rel_id}/top-tracks",
-                    params={"market": "US"},
+            if resp.status_code != 200:
+                logger.warning(
+                    f"Top tracks {resp.status_code} for {artist_id}"
                 )
-            except requests.RequestException as e:
-                logger.warning(f"Top tracks failed for {rel_id}: {e}")
                 continue
 
-            for track in top_data.get("tracks", []):
+            for track in resp.json().get("tracks", []):
                 tid = track.get("id")
                 if tid and tid not in seen_track_ids:
                     seen_track_ids.add(tid)
                     all_tracks.append(track)
 
-            time.sleep(EXPAND_REQUEST_DELAY)
+        except requests.RequestException as e:
+            logger.warning(f"Top tracks failed for {artist_id}: {e}")
+
+        time.sleep(EXPAND_REQUEST_DELAY)
 
     logger.info(
-        f"Batch done: {len(artist_spotify_ids)} seeds → "
-        f"{len(all_tracks)} new tracks"
+        f"Top-tracks batch: {len(artist_spotify_ids)} artists → "
+        f"{len(all_tracks)} tracks"
+    )
+    return all_tracks
+
+
+@shared_task(
+    autoretry_for=(requests.RequestException,),
+    max_retries=3,
+    retry_backoff=10,
+)
+def fetch_search_tracks_batch(
+    queries: list,
+    access_token: str,
+):
+    """
+    Worker B: runs multiple Spotify search queries (query_string, offset).
+    Each query yields up to 50 tracks.
+    Returns list of Spotify track data dicts.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    all_tracks = []
+    seen_track_ids = set()
+
+    for query_string, offset in queries:
+        try:
+            resp = _spotify_get(
+                "https://api.spotify.com/v1/search",
+                headers,
+                params={
+                    "q": query_string,
+                    "type": "track",
+                    "limit": 50,
+                    "offset": offset,
+                },
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    f"Search {resp.status_code} for q={query_string} "
+                    f"offset={offset}"
+                )
+                continue
+
+            items = resp.json().get("tracks", {}).get("items", [])
+            for track in items:
+                tid = track.get("id")
+                if tid and tid not in seen_track_ids:
+                    seen_track_ids.add(tid)
+                    all_tracks.append(track)
+
+        except requests.RequestException as e:
+            logger.warning(
+                f"Search failed q={query_string} offset={offset}: {e}"
+            )
+
+        time.sleep(EXPAND_REQUEST_DELAY)
+
+    logger.info(
+        f"Search batch: {len(queries)} queries → {len(all_tracks)} tracks"
     )
     return all_tracks
 
@@ -873,7 +938,6 @@ def expand_catalog_save(all_results):
 
     # Build cold start scores
     track_scores = {}
-    total = len(scored_tracks)
     for rank, (track_id, popularity) in enumerate(scored_tracks, start=1):
         track_scores[track_id] = {
             "rank": rank,
@@ -887,4 +951,35 @@ def expand_catalog_save(all_results):
         f"as SPOTIFY_RELATED"
     )
     return f"Expanded: {len(track_scores)} tracks"
+
+
+@shared_task
+def enrich_lastfm_tags_for_new_artists():
+    """
+    Dispatches get_artist_info for every artist that has tracks
+    but no ArtistLastFMData yet. get_artist_info automatically
+    chains → get_artist_tags → inherit_track_tags for each track.
+    """
+    from music.models import ArtistLastFMData
+
+    already_fetched = set(
+        ArtistLastFMData.objects
+        .values_list("artist_id", flat=True)
+    )
+
+    # Artists that have at least one track but no LastFM data
+    artist_ids = list(
+        Artist.objects
+        .filter(tracks__isnull=False)
+        .exclude(id__in=already_fetched)
+        .distinct()
+        .values_list("id", flat=True)
+    )
+
+    logger.info(f"Enriching Last.fm tags for {len(artist_ids)} artists")
+
+    for aid in artist_ids:
+        get_artist_info.delay(aid)
+
+    return f"Dispatched {len(artist_ids)} get_artist_info tasks"
 
