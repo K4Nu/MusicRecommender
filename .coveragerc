@@ -1,12 +1,9 @@
 [run]
-source = users,utils
 omit =
     */migrations/*
     */admin.py
     */tests/*
-    */tasks/*
     */youtube_classifiers.py
-    */services.py
 
 [report]
 exclude_lines =

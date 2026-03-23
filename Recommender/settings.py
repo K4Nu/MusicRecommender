@@ -12,6 +12,7 @@ load_dotenv()
 
 # ---------------------- API KEY --------------------------
 LASTFM_API_KEY=os.getenv("LASTFM_API_KEY")
+FIELD_ENCRYPTION_KEY = os.getenv("FIELD_ENCRYPTION_KEY", "")
 
 # ---------------------- SECURITY / DEBUG ----------------------
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-change-me")
