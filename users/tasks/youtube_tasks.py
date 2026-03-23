@@ -1,12 +1,15 @@
-import requests
-from django.utils import timezone
-from users.models import YoutubeChannel, UserYoutubeChannel, YoutubeAccount
 import logging
-from celery import shared_task, chord
-from users.youtube_classifiers import compute_preliminary_score,compute_final_score
-from users.services import ensure_youtube_token
-from utils.locks import ResourceLock, ResourceLockedException
 import os
+
+import requests
+from celery import chord, shared_task
+from django.utils import timezone
+
+from users.models import UserYoutubeChannel, YoutubeAccount, YoutubeChannel
+from users.services import ensure_youtube_token
+from users.youtube_classifiers import compute_final_score, compute_preliminary_score
+from utils.locks import ResourceLock, ResourceLockedException
+
 logger = logging.getLogger(__name__)
 
 

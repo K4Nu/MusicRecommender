@@ -1,6 +1,8 @@
 from django.db import models
 from django.db.models import Q
+
 from .genre import Genre
+
 
 class Artist(models.Model):
     spotify_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)  # ← Added db_index

@@ -1,8 +1,10 @@
-from django.utils import timezone
-from datetime import timedelta
-import requests
-from .models import SpotifyAccount, YoutubeAccount
 import os
+
+import requests
+from django.utils import timezone
+
+from .models import SpotifyAccount, YoutubeAccount
+
 
 def refresh_spotify_account(spotify):
     response = requests.post(

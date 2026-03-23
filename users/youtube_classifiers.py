@@ -1,5 +1,5 @@
-from typing import Optional, List
 import string
+
 MUSIC_TOPICS_STRONG = {
     "music", "pop_music", "rock_music", "hip_hop_music", "electronic_music",
     "dance_music", "classical_music", "jazz", "blues", "country_music",
@@ -83,9 +83,7 @@ def compute_preliminary_score(channel_data: dict) -> dict:
     for slug in slugs:
         if slug in MUSIC_TOPICS_STRONG:
             score_topics += 2.0
-        elif slug in MUSIC_TOPICS_WEAK:
-            score_topics += 1.0
-        elif "music" in slug:
+        elif slug in MUSIC_TOPICS_WEAK or "music" in slug:
             score_topics += 1.0
 
     score_topics = min(score_topics, 3.0)
@@ -116,7 +114,7 @@ def compute_preliminary_score(channel_data: dict) -> dict:
     }
 
 
-def compute_final_score(recent_video_categories: Optional[List[int]], curr_score: float) -> dict:
+def compute_final_score(recent_video_categories: list[int] | None, curr_score: float) -> dict:
     """
     Dodaje punktację z kategorii ostatnich filmów.
     Returns: dict z total_score, score_videos, is_music

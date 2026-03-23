@@ -1,7 +1,8 @@
-from django.db import models
 from django.contrib.auth import get_user_model
-from .cold_start_track import ColdStartTrack
+from django.db import models
 from django.db.models import Count, Q
+
+from .cold_start_track import ColdStartTrack
 
 User = get_user_model()
 

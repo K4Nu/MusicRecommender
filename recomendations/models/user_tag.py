@@ -1,8 +1,8 @@
 from django.contrib.auth import get_user_model
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import Avg
-from django.core.validators import MinValueValidator, MaxValueValidator
-from django.contrib.auth import get_user_model
+
 from music.models import Tag
 
 User=get_user_model()
