@@ -1,13 +1,14 @@
-from celery import shared_task,chord
-from django.utils import timezone
-from datetime import timedelta, datetime
-import requests
-from users.models import UserTopItem, User, SpotifyAccount, ListeningHistory, SpotifyPlaylist, SpotifyPlaylistTrack
-from utils.locks import ResourceLock,ResourceLockedException
-from datetime import date
 import logging
-from music.models import Artist, Track, Album, Genre
+from datetime import date, datetime
+
+import requests
+from celery import chord, shared_task
+from django.utils import timezone
+
+from music.models import Album, Artist, Genre, Track
+from users.models import ListeningHistory, SpotifyAccount, SpotifyPlaylist, SpotifyPlaylistTrack, User, UserTopItem
 from users.services import ensure_spotify_token
+from utils.locks import ResourceLock, ResourceLockedException
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +250,7 @@ def fetch_recently_played(headers, user_id):
         if history_events:
             ListeningHistory.objects.bulk_create(history_events)
 
-    except requests.exceptions.RequestException as e:
+    except requests.exceptions.RequestException:
         logger.info('f"Failed to fetch recently played: {e}"')
 
 

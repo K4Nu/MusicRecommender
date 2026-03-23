@@ -1,7 +1,9 @@
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+
 from .artist import Artist
 from .tag import Tag
-from django.core.validators import MinValueValidator, MaxValueValidator
+
 
 class ArtistTagManager(models.Manager):
     def top_tags(self, artist, limit=10, source="computed"):

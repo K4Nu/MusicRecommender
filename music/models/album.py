@@ -1,5 +1,7 @@
 from django.db import models
+
 from .artist import Artist
+
 
 class Album(models.Model):
     class AlbumTypes(models.TextChoices):

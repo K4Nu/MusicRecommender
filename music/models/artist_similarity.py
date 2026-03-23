@@ -1,5 +1,7 @@
-from .base_similarity import BaseSimiliarityManager,BaseSimilarity
 from django.db import models
+
+from .base_similarity import BaseSimilarity, BaseSimiliarityManager
+
 
 class ArtistSimilarityManager(BaseSimiliarityManager):
     from_field = "from_artist"

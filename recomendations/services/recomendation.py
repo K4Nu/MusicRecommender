@@ -1,19 +1,21 @@
 import logging
 from collections import defaultdict
-from django.utils import timezone
+
 from django.db import transaction
 from django.db.models import Max
-from recomendations.models import (
-    Recommendation,
-    RecommendationItem,
-    ColdStartTrack,
-    UserTag,
-    OnboardingEvent,
-    RecommendationFeedback,
-)
+from django.utils import timezone
+
 from music.models import Track, TrackSimilarity, TrackTag
-from users.models import ListeningHistory, UserTopItem, SpotifyAccount
-from recomendations.services.tag_filter import MIN_TAG_USAGE_COUNT, BLOCKED_TAG_NAMES
+from recomendations.models import (
+    ColdStartTrack,
+    OnboardingEvent,
+    Recommendation,
+    RecommendationFeedback,
+    RecommendationItem,
+    UserTag,
+)
+from recomendations.services.tag_filter import BLOCKED_TAG_NAMES, MIN_TAG_USAGE_COUNT
+from users.models import ListeningHistory, SpotifyAccount, UserTopItem
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,8 @@
 from django.db import models
 from django.db.models import Q
-from music.models import Track, Artist  # ✅ fixed import
+
+from music.models import Artist, Track  # ✅ fixed import
+
 from .recommendation import Recommendation
 
 

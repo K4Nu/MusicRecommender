@@ -1,10 +1,12 @@
 import logging
+
 from django.db import transaction
-from recomendations.models import UserTag, RecommendationFeedback
+
 from music.models import TrackTag
+from recomendations.models import RecommendationFeedback, UserTag
 from recomendations.services.tag_filter import (
-    MIN_TAG_USAGE_COUNT,
     BLOCKED_TAG_NAMES,
+    MIN_TAG_USAGE_COUNT,
 )
 
 logger = logging.getLogger(__name__)
