@@ -1,6 +1,8 @@
 from django.db import models
+
 from .album import Album
 from .artist import Artist
+
 
 class Track(models.Model):
     spotify_id = models.CharField(max_length=255,null=True,blank=True)

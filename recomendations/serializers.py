@@ -1,5 +1,14 @@
 from rest_framework import serializers
-from recomendations.models import ColdStartTrack, OnboardingEvent,RecommendationItem,Recommendation, UserTag, RecommendationFeedback
+
+from recomendations.models import (
+    ColdStartTrack,
+    OnboardingEvent,
+    Recommendation,
+    RecommendationFeedback,
+    RecommendationItem,
+    UserTag,
+)
+
 
 class ColdStartTrackSerializer(serializers.ModelSerializer):
     track_name = serializers.CharField(source="track.name")

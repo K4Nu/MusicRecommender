@@ -1,29 +1,40 @@
-from django.shortcuts import render, get_object_or_404
-from rest_framework.response import Response
-from rest_framework.views import APIView
-from rest_framework import permissions, status
-from recomendations.models import ColdStartTrack,UserTag,Recommendation, RecommendationItem, RecommendationFeedback
-from music.models import TrackTag, ArtistTag
-from .tasks.cold_start_tasks import create_cold_start_lastfm_tracks
-from .services.cold_start import cold_start_refresh_all
-from .services.recomendation import get_or_build_recommendation, detect_strategy
-from django.db import IntegrityError, transaction
-from django.views.decorators.cache import cache_page
-from django.utils.decorators import method_decorator
-from django.db.models import Count, Q
-from django.utils import timezone
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import permissions
 import logging
-from users.models import SpotifyAccount, YoutubeAccount
-from recomendations.models import ColdStartTrack, OnboardingEvent
-from recomendations.serializers import ColdStartTrackSerializer,OnboardingEventSerializer, RecommendationSerializer, HomeSerializer, RecommendationFeedbackSerializer
-from recomendations.services.tag_filter import filter_track_tags, filter_artist_tags
-from recomendations.tasks.recommendation_tasks import build_recommendation_task
+
+from django.db import transaction
+from django.db.models import Count, Prefetch, Q
 from django.shortcuts import get_object_or_404
-from django.db.models import Prefetch
+from django.utils import timezone
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
+from rest_framework import permissions, status
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from music.models import ArtistTag, TrackTag
+from recomendations.models import (
+    ColdStartTrack,
+    OnboardingEvent,
+    Recommendation,
+    RecommendationFeedback,
+    RecommendationItem,
+    UserTag,
+)
+from recomendations.serializers import (
+    ColdStartTrackSerializer,
+    HomeSerializer,
+    OnboardingEventSerializer,
+    RecommendationFeedbackSerializer,
+    RecommendationSerializer,
+)
+from recomendations.services.tag_filter import filter_artist_tags, filter_track_tags
+from recomendations.tasks.recommendation_tasks import build_recommendation_task
+from users.models import SpotifyAccount, YoutubeAccount
+
+from .services.cold_start import cold_start_refresh_all
 from .services.feedback_service import apply_feedback_to_tags
+from .services.recomendation import get_or_build_recommendation
+from .tasks.cold_start_tasks import create_cold_start_lastfm_tracks
+
 
 class ColdTest(APIView):
     permission_classes = [permissions.AllowAny]

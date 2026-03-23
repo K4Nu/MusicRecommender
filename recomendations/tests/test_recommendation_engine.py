@@ -8,22 +8,22 @@ Wymagane:
     pip install pytest-django
 """
 
-import pytest
-from django.utils import timezone
 from datetime import timedelta
 
-from users.models import User, SpotifyAccount, ListeningHistory
-from music.models import Artist, Album, Track, Tag, TrackTag
-from recomendations.models import (
-    Recommendation,
-    RecommendationItem,
-    RecommendationFeedback,
-    UserTag,
-    ColdStartTrack,
-)
-from recomendations.services.recomendation import detect_strategy
-from recomendations.services.feedback_service import apply_feedback_to_tags
+import pytest
+from django.utils import timezone
 
+from music.models import Album, Artist, Tag, Track, TrackTag
+from recomendations.models import (
+    ColdStartTrack,
+    Recommendation,
+    RecommendationFeedback,
+    RecommendationItem,
+    UserTag,
+)
+from recomendations.services.feedback_service import apply_feedback_to_tags
+from recomendations.services.recomendation import detect_strategy
+from users.models import ListeningHistory, SpotifyAccount, User
 
 # =========================================================
 # FIXTURES

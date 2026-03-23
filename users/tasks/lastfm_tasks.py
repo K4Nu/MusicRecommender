@@ -1,21 +1,45 @@
-from collections import defaultdict
 import hashlib
-from celery import shared_task, chain, group
-from django.utils import timezone
-from django.conf import settings
-from datetime import timedelta
-import logging
-import requests
 import heapq
-from utils.locks import ResourceLock, ResourceLockedException
-from users.models import UserTopItem
-from music.models import (Artist,ArtistLastFMData,ArtistTag, Tag, ArtistSimilarity, TrackTag, TrackSimilarity, Track, TrackLastFMData, Album)
+import logging
+from collections import defaultdict
+from datetime import timedelta
+
+import requests
+from celery import chain, group, shared_task
+from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
+
+from music.models import (
+    Album,
+    Artist,
+    ArtistLastFMData,
+    ArtistSimilarity,
+    ArtistTag,
+    Tag,
+    Track,
+    TrackLastFMData,
+    TrackSimilarity,
+    TrackTag,
+)
+from users.models import UserTopItem
+from utils.locks import ResourceLock, ResourceLockedException
 
 logger = logging.getLogger(__name__)
 
 LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
 LASTFM_DAYS_TTL = 30
+
+LASTFM_PLACEHOLDER_HASH = "2a96cbd8b46e442fc41c2b86b821562f"
+
+
+def clean_lastfm_image(url: str | None) -> str | None:
+    """Return None if url is the LastFM 'no image' placeholder."""
+    if not url:
+        return None
+    if LASTFM_PLACEHOLDER_HASH in url:
+        return None
+    return url
 
 # ============================================================
 # HELPERS
@@ -99,14 +123,14 @@ def lastfm_get(params: dict) -> dict | None:
             )
             raise
 
-    except requests.Timeout as e:
+    except requests.Timeout:
         logger.warning(
             "Last.fm request timeout - will retry",
             extra={"params": params}
         )
         raise
 
-    except requests.ConnectionError as e:
+    except requests.ConnectionError:
         logger.warning(
             "Last.fm connection error - will retry",
             extra={"params": params}
@@ -356,7 +380,7 @@ def _process_artist_tags(artist_id: int) -> None:
                 count = int(count_raw)
                 weight = min(count / 100.0, 1.0)
                 logger.info(f"✅ Tag '{name}': count={count}, weight={weight:.3f}")
-            except (TypeError, ValueError) as e:
+            except (TypeError, ValueError):
                 # Count exists but isn't valid
                 count = None
                 weight = max(0.1, 1.0 - idx * 0.1)
@@ -469,7 +493,7 @@ def get_similar_artists(artist_id: int) -> None:
             continue
 
         images = item.get("image", [])
-        image_url = images[-1].get("#text") if images else None
+        image_url = clean_lastfm_image(images[-1].get("#text") if images else None)
 
         candidates.append({
             "name": name,
@@ -864,7 +888,7 @@ def get_similar_tracks(track_id: int) -> None:
             artist_name = artist_data
 
         images = item.get("image", [])
-        image_url = images[-1].get("#text") if images else None
+        image_url = clean_lastfm_image(images[-1].get("#text") if images else None)
 
         candidates.append({
             "name": name,
@@ -1114,6 +1138,7 @@ def _create_track_from_lastfm(
                 )
 
         # Album stub (required by model)
+        clean_image = clean_lastfm_image(image_url)
         album_name = f"Unknown album – {artist.name if artist else 'Unknown'} – {track_name}"
         album = Album.objects.filter(name=album_name).first()
         album, _ = Album.objects.get_or_create(
@@ -1121,7 +1146,7 @@ def _create_track_from_lastfm(
             defaults={
                 "album_type": Album.AlbumTypes.SINGLE,
                 "release_date": None,
-                "image_url": image_url,
+                "image_url": clean_image,
             },
         )
 
@@ -1135,7 +1160,7 @@ def _create_track_from_lastfm(
             duration_ms=0,  # unknown
             popularity=None,
             preview_url=None,
-            image_url=image_url,
+            image_url=clean_image,
         )
 
         if artist:

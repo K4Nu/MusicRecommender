@@ -1,12 +1,13 @@
 from celery import shared_task
 from django.contrib.auth import get_user_model
+
+from recomendations.models import Recommendation
 from recomendations.services.recomendation import (
-    get_or_build_recommendation,
-    detect_strategy,
     build_cold_start_recommendation,
     build_hybrid_recommendation,
+    detect_strategy,
+    get_or_build_recommendation,
 )
-from recomendations.models import Recommendation
 
 User = get_user_model()
 

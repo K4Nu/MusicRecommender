@@ -1,20 +1,21 @@
 import os
 from datetime import timedelta
 from http import HTTPStatus
-from .services import ensure_valid_external_tokens
+
 import requests
 from django.utils import timezone
-from djoser.serializers import UserSerializer
+from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework import permissions, status
-from .tasks.spotify_tasks import fetch_spotify_initial_data,fetch_recently_played
-from .tasks.youtube_tasks import sync_youtube_user
-from users.models import SpotifyAccount,UserTopItem,YoutubeAccount
-from rest_framework import generics
+
+from users.models import SpotifyAccount, UserTopItem, YoutubeAccount
+
 from .serializers import UserTopTrackSerializer
-from drf_spectacular.utils import extend_schema
-from .tasks.lastfm_tasks import sync_user_top_artists,sync_user_top_tracks,lastfm_initial_sync
+from .services import ensure_valid_external_tokens
+from .tasks.lastfm_tasks import lastfm_initial_sync
+from .tasks.spotify_tasks import fetch_recently_played, fetch_spotify_initial_data
+from .tasks.youtube_tasks import sync_youtube_user
+
 
 class SpotifyConnect(APIView):
     permission_classes = [permissions.IsAuthenticated]

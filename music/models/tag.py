@@ -1,5 +1,6 @@
 from django.db import models
 
+
 class Tag(models.Model):
     """Normalized, canonical tags"""
     name = models.CharField(max_length=100)

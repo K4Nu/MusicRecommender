@@ -1,7 +1,9 @@
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
-from django.core.validators import MinValueValidator, MaxValueValidator
-from .track import Track
+
 from .tag import Tag
+from .track import Track
+
 
 class TrackTagManager(models.Manager):
     def top_tags(self, track, limit=10, source="computed"):

@@ -1,11 +1,11 @@
-import time
-from django.core.cache import cache
-from functools import wraps
 import logging
+import time
+
+from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
-class ResourceLock():
+class ResourceLock:
     """Generic lock manager for any resource type"""
 
     def __init__(self, resource_type, resource_id, timeout=600):
