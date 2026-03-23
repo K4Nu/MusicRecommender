@@ -2,7 +2,6 @@ import logging
 import os
 import re
 import time
-
 import requests
 from celery import chord, group, shared_task
 from django.contrib.auth import get_user_model
