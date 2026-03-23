@@ -2,19 +2,21 @@ import logging
 import os
 import re
 import time
+
 import requests
-from celery import shared_task, group, chord
+from celery import chord, group, shared_task
 from django.contrib.auth import get_user_model
-from music.models import Track, Artist
+
+from music.models import Artist, Track
 from recomendations.models import ColdStartTrack
 from users.services import ensure_spotify_token
-from users.tasks.spotify_tasks import save_tracks_bulk
 from users.tasks.lastfm_tasks import (
+    get_artist_info,
     get_similar_artists_task,
     get_similar_track_task,
-    get_artist_info,
     get_track_info,
 )
+from users.tasks.spotify_tasks import save_tracks_bulk
 from utils.locks import ResourceLock, ResourceLockedException
 
 logger = logging.getLogger(__name__)
