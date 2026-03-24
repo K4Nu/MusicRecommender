@@ -1,10 +1,3 @@
-"""
-Tests for users/services.py
-
-Covers: refresh_spotify_account, ensure_spotify_token,
-        refresh_youtube_account, ensure_youtube_token,
-        ensure_valid_external_tokens
-"""
 import pytest
 import requests as req
 from unittest.mock import patch, MagicMock
@@ -19,7 +12,6 @@ from users.services import (
     ensure_youtube_token,
     ensure_valid_external_tokens,
 )
-
 
 # =========================================================
 # FIXTURES

@@ -4,6 +4,7 @@ omit =
     */admin.py
     */tests/*
     */youtube_classifiers.py
+    */youtube_tasks.py
 
 [report]
 exclude_lines =

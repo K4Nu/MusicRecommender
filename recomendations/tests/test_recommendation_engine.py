@@ -154,7 +154,7 @@ def _make_recommendation(user, track):
 
 
 # =========================================================
-# 1. DETEKCJA STRATEGII
+# 1. STRATEGY DETECTION
 # =========================================================
 
 class TestDetectStrategy:
@@ -188,7 +188,7 @@ class TestDetectStrategy:
 
 
 # =========================================================
-# 2. PETLA ZWROTNA
+# 2. FEEDBACK LOOP
 # =========================================================
 
 class TestFeedbackLoop:
@@ -242,7 +242,7 @@ class TestFeedbackLoop:
 
 
 # =========================================================
-# 3. DYWERSYFIKACJA ARTYSTOW
+# 3. ARTIST DIVERSIFICATION
 # =========================================================
 
 class TestArtistDiversity:
@@ -284,7 +284,7 @@ class TestArtistDiversity:
 
 
 # =========================================================
-# 4. SELEKCJA COLD START
+# 4. COLD START
 # =========================================================
 
 class TestColdStartSelection:
@@ -317,7 +317,7 @@ class TestColdStartSelection:
 
 
 # =========================================================
-# 5. METRYKI EWALUACYJNE
+# 5. EVALUATION METRICS
 # =========================================================
 @pytest.mark.django_db
 class TestEvaluationMetrics:
