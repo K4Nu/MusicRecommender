@@ -36,6 +36,8 @@ from .services.recomendation import get_or_build_recommendation
 from .tasks.cold_start_tasks import create_cold_start_lastfm_tracks
 
 
+logger = logging.getLogger(__name__)
+
 class ColdTest(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -46,14 +48,6 @@ class ColdTest(APIView):
             {"message": "Cold start"},
             status=status.HTTP_200_OK
         )
-
-
-"""
-By now without postgres
-"""
-
-logger = logging.getLogger(__name__)
-
 
 class InitialSetupView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -95,7 +89,6 @@ class InitialSetupView(APIView):
             logger.info(f"InitialSetupView response: {response}")
             return Response(response)
 
-        # 🎧 REAL ONBOARDING (tylko jeśli NIE ma integracji)
         if needs_integration:
             if not profile.onboarding_started_at:
                 profile.onboarding_started_at = timezone.now()
@@ -179,9 +172,7 @@ class OnboardingInteractView(APIView):
             f"DEBUG: _apply_onboarding_like called for user={user.id}, track={track.id}"
         )
 
-        # ==========================================
         # PRIMARY: TrackTag
-        # ==========================================
         track_tags = filter_track_tags(
             TrackTag.objects.filter(track=track)
         )
@@ -204,9 +195,7 @@ class OnboardingInteractView(APIView):
             logger.info("DEBUG: UserTag created from TrackTag")
             return
 
-        # ==========================================
         # FALLBACK: ArtistTag
-        # ==========================================
         artist_tags = filter_artist_tags(
             ArtistTag.objects.filter(
                 artist__in=track.artists.all(),
@@ -231,9 +220,7 @@ class OnboardingInteractView(APIView):
             logger.info("DEBUG: UserTag created from ArtistTag fallback")
             return
 
-        # ==========================================
         #NO SIGNAL
-        # ==========================================
         logger.warning(
             f"WARNING: No TrackTag or ArtistTag found for track={track.id}"
         )
