@@ -109,16 +109,12 @@ class UserTopTracks(APIView):
     def get(self, request):
         time_range=request.query_params.get('time_range', "medium_term")
 
-        top_items = UserTopItem.objects.filter(
-            user=request.user,
-            item_type='track',
-            time_range=time_range
-        ).select_related('track')[:20]
+        top_items = UserTopItem.objects.filter(...).select_related('track').prefetch_related('track__artists')[:20]
 
         data=[{
             "rank":item.rank,
             "name":item.track.name,
-            "artists":[a.name for a in item.track.artists.all()],
+            "artists": [a.name for a in item.track.artists.all()],
             "image_url":item.track.image_url,
             "spotify_id":item.track.spotify_id,
         } for item in top_items]
