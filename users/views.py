@@ -223,14 +223,10 @@ class YoutubeConnect(APIView):
             token_data['code_verifier'] = code_verifier
 
         try:
-            print("📤 Requesting token from Google...")
             token_response = requests.post(token_url, data=token_data, timeout=10)
-
-            print(f"📥 Google response status: {token_response.status_code}")
 
             if not token_response.ok:
                 error_text = token_response.text
-                print(f"❌ Google error: {error_text}")
 
                 return Response(
                     {
@@ -242,10 +238,8 @@ class YoutubeConnect(APIView):
                 )
 
             token_json = token_response.json()
-            print("✅ Token received from Google")
 
         except requests.exceptions.RequestException as e:
-            print(f"❌ Request error: {str(e)}")
             return Response(
                 {"detail": f"Request error: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -262,7 +256,6 @@ class YoutubeConnect(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Zapisz konto
         expires_at = timezone.now() + timedelta(seconds=expires_in)
 
 
@@ -278,8 +271,6 @@ class YoutubeConnect(APIView):
             sync_youtube_user.delay(youtube_account.id)
 
         action = "created" if created else "updated"
-        print(f"✅ YouTube account {action} for user {request.user.email}")
-
 
         return Response(
             {

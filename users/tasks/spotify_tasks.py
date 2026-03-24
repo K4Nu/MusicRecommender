@@ -12,17 +12,19 @@ from utils.locks import ResourceLock, ResourceLockedException
 
 logger = logging.getLogger(__name__)
 
-def parse_spotify_release_date(value: str):
+def parse_spotify_release_date(value: str) -> date | None:
     if not value:
         return None
-
-    if len(value) == 4:          # YYYY
-        return date(int(value), 1, 1)
-    if len(value) == 7:          # YYYY-MM
-        year, month = value.split("-")
-        return date(int(year), int(month), 1)
-    if len(value) == 10:         # YYYY-MM-DD
-        return date.fromisoformat(value)
+    try:
+        if len(value) == 4:          # YYYY
+            return date(int(value), 1, 1)
+        if len(value) == 7:          # YYYY-MM
+            year, month = value.split("-")
+            return date(int(year), int(month), 1)
+        if len(value) == 10:         # YYYY-MM-DD
+            return date.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
 
     return None
 

@@ -50,7 +50,7 @@ urlpatterns = [
     path('api/schema/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
     path("test/", TestLastFM.as_view()),
     path("t/", ColdTest.as_view()),
-    path("cold_start/", InitialSetupView.as_view()),
+    path("api/cold_start/", InitialSetupView.as_view()),
     path("essa/",GetFeature.as_view()),
     path("api/onboarding/", OnboardingInteractView.as_view()),
     path("api/me/", UserStatus.as_view()),
