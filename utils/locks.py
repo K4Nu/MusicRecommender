@@ -41,8 +41,8 @@ class ResourceLock:
         if not self.acquire():
             lock_info = self.get_lock_info()
             if lock_info:
-                aquired_at = lock_info.get("acquired_at","unknown")
-                age=time.time()-aquired_at if isinstance(aquired_at,int) else "unknown"
+                acquired_at = lock_info.get("acquired_at","unknown")
+                age=time.time()-acquired_at if isinstance(acquired_at,int) else "unknown"
                 logger.warning(
                     f"{self.resource_type} {self.resource_id} locked for {age}s"
                 )
@@ -50,6 +50,7 @@ class ResourceLock:
                 f"{self.resource_type} {self.resource_id} is already being processed"
 
             )
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Automatically release lock when exiting context"""
