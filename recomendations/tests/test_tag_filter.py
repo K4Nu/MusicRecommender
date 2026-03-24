@@ -1,8 +1,3 @@
-"""
-Tests for recomendations/services/tag_filter.py
-
-Covers: is_valid_tag, filter_track_tags, filter_artist_tags
-"""
 import pytest
 from music.models import Tag, TrackTag, ArtistTag, Artist, Album, Track
 from recomendations.services.tag_filter import (
@@ -11,7 +6,6 @@ from recomendations.services.tag_filter import (
     filter_artist_tags,
     MIN_TAG_USAGE_COUNT,
 )
-
 
 # =========================================================
 # FIXTURES
